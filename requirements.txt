@@ -3,3 +3,4 @@ fastapi
 uvicorn
 requests
 fastmcp
+mcp[cli]
