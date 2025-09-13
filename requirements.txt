@@ -1,0 +1,7 @@
+
+fastapi
+uvicorn
+requests
+fastmcp
+
+rnd_iyTxPodZHBAN8LkRyea3e0MKwEqt
