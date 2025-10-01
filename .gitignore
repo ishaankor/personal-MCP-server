@@ -1,0 +1,6 @@
+read_projects.txt
+personal_website.txt
+about_me.txt
+linkedin_data.json
+.DS_Store
+__pycache__/
