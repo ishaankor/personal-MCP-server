@@ -1,6 +1,6 @@
 # Ishaan Koradia - Personal MCP Server
 
-A Model Context Protocol (MCP) server that provides information about me -- Ishaan Koradia, an aspiring AI/ML Engineer and undergraduate student at UC San Diego. 
+A remote Model Context Protocol (MCP) server that provides information about me via StreamableHTTP -- Ishaan Koradia, an aspiring AI/ML Engineer and undergraduate student at UC San Diego. 
 
 ## About
 
