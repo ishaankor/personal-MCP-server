@@ -2,5 +2,8 @@ read_projects.txt
 personal_website.txt
 about_me.txt
 linkedin_data.json
+Dockerfile
+requirements.txt
+render.yaml
 .DS_Store
 __pycache__/

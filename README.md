@@ -32,16 +32,6 @@ The server implements the MCP protocol by utilizing roots/resources and tool cal
 - `/mcp/resources` - Available resources and data
 - `/mcp/tools` - Available tools and functions
 
-## Project Structure
-
-```
-personal-MCP-server/
-├── main.py              # MCP server with tools
-├── requirements.txt     # Python dependencies
-├── render.yaml          # Deployment configuration
-└── README.md           # This file
-```
-
 ### Connect
 - GitHub: [ishaankor](https://github.com/ishaankor)
 - LinkedIn: [ishaankoradia](https://linkedin.com/in/ishaankoradia)
