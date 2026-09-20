@@ -1,0 +1,53 @@
+# Query Context for Ishaan Koradia's Projects
+
+## Project Understanding Guide
+When users ask about projects using common terms, map them to actual project names:
+
+### Known Projects & Keywords:
+- **Minecraft Server**: minecraft-server, mc-server, minecraftserver
+- **Personal Website**: my-personal-website, portfolio, website
+- **Data Science Portfolio**: data-science-portfolio, analysis projects
+- **Recipe Ratings Analysis**: ratings-recipe-analysis, recipe ratings, food analysis, "ratings one", "his ratings one", "the ratings project"
+- **Discord Bot (Transformi)**: transformi, discord bot, ML bot
+- **Twitter Bot (Daily Motivation)**: daily-motivation, motivation bot, twitter bot
+- **NotesTaker**: notestaker, notes-taker, transcription tool, AI note tool
+- **Mobile Games**: mobile-game, unity-game, game projects
+- **Web Applications**: web apps, web projects, web development
+
+### Query Interpretation Examples:
+- "what is his ratings one about?" → ratings-recipe-analysis project
+- "tell me about the ratings project" → ratings-recipe-analysis
+- "minecraft" or "mc" → Look for minecraft-server related projects
+- "website" or "portfolio" → Look for my-personal-website
+- "bot" → Could be transformi (Discord) or daily-motivation (Twitter)
+- "game" → Look for mobile-game projects
+- "data science" or "analysis" → Look for data-science-portfolio or ratings-recipe-analysis
+- "AI" or "ML" → Look for transformi, notestaker, or ML-related projects
+
+### Tool Selection Strategy:
+1. **First**: Always use analyze_user_query to understand intent
+2. **For vague terms**: Use smart_project_search with keywords
+3. **For project details**: Use get_github_project_details with specific name
+4. **For build questions**: Use explain_project_build
+5. **For file structure**: Use list_project_files
+6. **For all projects**: Use list_all_github_projects
+7. **For LinkedIn info**: Use specific linkedin tools based on what's asked
+8. **For general Ishaan info**: Use get_about_ishaan_text
+
+### Common Mistakes to Avoid:
+- Don't use LinkedIn skills tool for project questions
+- Don't use about_ishaan for technical project details
+- Always try smart_project_search first for unclear project references
+- Use analyze_user_query to understand what the user really wants
+
+## RESPONSE QUALITY RULES:
+### NEVER return malformed responses like:
+- "Ishaan Koradia high school" 
+- "Ishaan Koradia [any query term]"
+- Person's name + query word concatenations
+
+### Instead provide natural answers:
+- High school: "Milpitas High School" or "He attended Milpitas High School"
+- If information missing: "I don't have that specific information available"
+
+### Use get_response_guidelines tool for formatting guidance when needed

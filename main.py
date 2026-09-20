@@ -1,928 +1,644 @@
-from mcp.server.fastmcp import FastMCP
 import os
-import requests
-# import random
-from thefuzz import fuzz
 import json
-
-def load_linkedin_data():
-    """Load LinkedIn data from static JSON file"""
-    try:
-        linkedin_data_path = os.path.join(os.path.dirname(__file__), "linkedin_data.json")
-        with open(linkedin_data_path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception as e:
-        print(f"Error loading LinkedIn data: {e}")
-        return None
-
-LINKEDIN_DATA = load_linkedin_data()
+import time
+import urllib.request
+import urllib.error
+import re
+import math
+import difflib
+import uuid
+from dataclasses import dataclass, field
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+from typing import Dict, Any, List, Optional, Tuple
+from mcp.server.fastmcp import FastMCP
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
 mcp_port = str(os.getenv('MCP_HTTP_PORT', '5000'))
 print(f"Starting MCP server on port {mcp_port}")
 mcp_host = str(os.getenv('MCP_HTTP_HOST', '127.0.0.1'))
 print(f"Binding MCP server to host {mcp_host}")
 
-print("Using static LinkedIn data from linkedin_data.json")
-
 mcp = FastMCP(name="RemoteMCP", port=mcp_port, host=mcp_host, stateless_http=True, json_response=True)
 
-@mcp.resource(uri="status://health", name="Health Check", description="Returns the health status of the server.")
-def health_check_resource():
-    return {"status": "ok"}
+@mcp.custom_route("/health", methods=["GET", "HEAD"])
+async def health_check(request: Request):
+    return JSONResponse({"status": "healthy", "service": "personal-mcp-server"})
 
-@mcp.resource(uri="resource://about_me", name="Information for Ishaan Koradia", description="Ishaan Koradia's skills, contact info, interests, and fun facts")
-def about_me_resource():
-    path = os.path.join(os.path.dirname(__file__), "about_me.txt")
-    with open(path, "r", encoding="utf-8") as f:
-        return f.read()
+@mcp.custom_route("/", methods=["GET", "HEAD"])
+async def root(request: Request):
+    return JSONResponse({"status": "healthy", "service": "personal-mcp-server"})
 
-@mcp.resource(uri="resource://personal_website", name="Personal Website Info", description="Provides details about Ishaan Koradia's personal website, including tech stack and GitHub project.")
-def personal_website_resource():
-    path = os.path.join(os.path.dirname(__file__), "personal_website.txt")
-    with open(path, "r", encoding="utf-8") as f:
-        return f.read()
+# ---------------------------------------------------------------------------
+# SPOTIFY TELEMETRY INTEGRATION
+# ---------------------------------------------------------------------------
+SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID", "")
+SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET", "40d8aa08c0e34cc8aebd8249ea3d0bea")
+SPOTIFY_REFRESH_TOKEN = os.getenv("SPOTIFY_REFRESH_TOKEN", "AQAMVxm1X_pNm2nBd9Sx-1I_JpA2a2MeqGqwU35rQ80-BKpBMl_vvgnPv7lz8qxfGTyPRzH5MrGbEW1BPuseNSbmq7QsLbAro42Io7jlvuKbpyOGk7nCTP1UiIbAFf7Whuo")
 
-# @mcp.resource(uri="resource://read_projects", name="Current Projects of Ishaan Koradia", description="Lists current projects Ishaan Koradia is working on, meaning 'Transformi' and 'Daily Motivation'.")
-# def read_projects_resource():
-#     path = os.path.join(os.path.dirname(__file__), "read_projects.txt")
-#     with open(path, "r", encoding="utf-8") as f:
-#         return f.read()
+_SPOTIFY_ACCESS_TOKEN: Optional[str] = None
+_SPOTIFY_TOKEN_EXPIRES: float = 0.0
+
+def _get_spotify_access_token() -> Optional[str]:
+    global _SPOTIFY_ACCESS_TOKEN, _SPOTIFY_TOKEN_EXPIRES
+    now = time.time()
+    if _SPOTIFY_ACCESS_TOKEN and _SPOTIFY_TOKEN_EXPIRES > now + 60:
+        return _SPOTIFY_ACCESS_TOKEN
     
-@mcp.tool(name="add", description="Adds two numbers")
-def add_tool(a: int, b: int) -> int:
-    return a + b
+    if not SPOTIFY_REFRESH_TOKEN:
+        return None
+        
+    try:
+        import base64
+        import ssl
+        import urllib.parse
+        auth_header = base64.b64encode(f"{SPOTIFY_CLIENT_ID}:{SPOTIFY_CLIENT_SECRET}".encode()).decode()
+        data = urllib.parse.urlencode({
+            "grant_type": "refresh_token",
+            "refresh_token": SPOTIFY_REFRESH_TOKEN
+        }).encode()
+        req = urllib.request.Request("https://accounts.spotify.com/api/token", data=data, headers={
+            "Authorization": f"Basic {auth_header}",
+            "Content-Type": "application/x-www-form-urlencoded"
+        })
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        with urllib.request.urlopen(req, context=ctx, timeout=8) as resp:
+            tokens = json.loads(resp.read().decode())
+            _SPOTIFY_ACCESS_TOKEN = tokens.get("access_token")
+            _SPOTIFY_TOKEN_EXPIRES = now + float(tokens.get("expires_in", 3600))
+            return _SPOTIFY_ACCESS_TOKEN
+    except Exception as e:
+        print(f"[Spotify] Error refreshing token: {e}")
+        return None
 
-@mcp.tool(
-    name="get_about_ishaan_text",
-    description="Returns general information about Ishaan Koradia (skills, contact info, interests, fun facts). Use ONLY for questions about Ishaan himself, NOT about his projects or code.",
-    annotations={
-        "resource_name": "Optional. Defaults to 'resource://about_me'"
-    }
-)
-async def read_resources_tool(resource_name="resource://about_me") -> str:
-    resource_contents = await mcp.read_resource(resource_name)
-    if resource_contents and isinstance(resource_contents, list):
-        return resource_contents[0].content
-    return "Resource content not found or invalid."
-
-# @mcp.tool(name="get_transformi_and_daily_motivation_projects",
-#     description="Returns information like their description, technologies, impact, strengths, and opportunities for growth about Ishaan Koradia's current projects which are Transformi (Discord bot for data transformations) and Daily Motivation (Twitter bot). Use this tool when asked about Transformi and Daily Motivation.",
-#     annotations={
-#             "resource_name": "Optional. Defaults to 'resource://read_projects'"
-#     }
-# )
-# async def read_projects_tool(resource_name="resource://read_projects") -> str:
-#     resource_contents = await mcp.read_resource(resource_name)
-#     if resource_contents and isinstance(resource_contents, list):
-#         print(f"Resource content found: {resource_contents[0].content[:100]}...")
-#         return resource_contents[0].content
-#     return "Resource content not found or invalid."
-
-@mcp.tool(
-    name="get_ishaan_linkedin_basic_profile",
-    description="Get Ishaan Koradia's basic LinkedIn profile information (name, headline, location, industry, summary). Fast and lightweight using static data."
-)
-def get_linkedin_profile_tool() -> str:
-    """
-    Get basic LinkedIn profile data for Ishaan Koradia using static data
-    """
-    if not LINKEDIN_DATA:
-        return json.dumps({
-            "error": "LinkedIn data not available",
-            "status": "error"
-        }, indent=2)
+def get_spotify_playback() -> Dict[str, Any]:
+    token = _get_spotify_access_token()
+    if not token:
+        return {"isPlaying": False, "message": "Spotify not configured"}
+        
+    import ssl
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
     
-    profile_data = {
-        "name": f"{LINKEDIN_DATA.get('first_name', '')} {LINKEDIN_DATA.get('last_name', '')}".strip(),
-        "linkedin_url": f"https://www.linkedin.com/in/{LINKEDIN_DATA.get('public_identifier', 'ishaankoradia')}",
-        "profile_username": LINKEDIN_DATA.get("public_identifier", "ishaankoradia"),
-        "headline": LINKEDIN_DATA.get("headline", ""),
-        "location": LINKEDIN_DATA.get("location", ""),
-        "connections_count": LINKEDIN_DATA.get("connections_count", 0),
-        "follower_count": LINKEDIN_DATA.get("follower_count", 0),
-        "is_premium": LINKEDIN_DATA.get("is_premium", False),
-        "is_creator": LINKEDIN_DATA.get("is_creator", False),
-        "contact_info": LINKEDIN_DATA.get("contact_info", {}),
-        "languages": LINKEDIN_DATA.get("languages", []),
-        "extraction_method": "static_linkedin_data",
-        "status": "success",
-        "data_source": "linkedin_data.json"
-    }
-    
-    return json.dumps(profile_data, indent=2)
-
-@mcp.tool(
-    name="get_ishaan_linkedin_experience",
-    description="Get work experience history for Ishaan Koradia from LinkedIn using static data"
-)
-def get_linkedin_experience_tool() -> str:
-    """
-    Get LinkedIn work experience data for Ishaan Koradia using static data
-    """
-    if not LINKEDIN_DATA:
-        return json.dumps({
-            "error": "LinkedIn data not available",
-            "status": "error"
-        }, indent=2)
-    
-    experience_profile = {
-        "name": f"{LINKEDIN_DATA.get('first_name', '')} {LINKEDIN_DATA.get('last_name', '')}".strip(),
-        "linkedin_url": f"https://www.linkedin.com/in/{LINKEDIN_DATA.get('public_identifier', 'ishaankoradia')}",
-        "profile_username": LINKEDIN_DATA.get("public_identifier", "ishaankoradia"),
-        "extraction_method": "static_linkedin_data",
-        "status": "success",
-        "experience": []
-    }
-    
-    work_experience = LINKEDIN_DATA.get("work_experience", [])
-    for exp in work_experience:
-        exp_data = {
-            "company": exp.get("company", ""),
-            "position": exp.get("position", ""),
-            "location": exp.get("location", ""),
-            "start_date": exp.get("start", ""),
-            "end_date": exp.get("end", ""),
-            "skills": exp.get("skills", []),
-            "company_id": exp.get("company_id", "")
-        }
-        experience_profile["experience"].append(exp_data)
-    
-    experience_profile["summary_stats"] = {
-        "total_experiences": len(experience_profile["experience"]),
-        "companies": list(set([exp.get("company", "") for exp in work_experience if exp.get("company")])),
-        "total_skills": len(set([skill for exp in work_experience for skill in exp.get("skills", [])]))
-    }
-    
-    return json.dumps(experience_profile, indent=2)
-
-@mcp.tool(
-    name="get_ishaan_linkedin_education",
-    description="Get education history for Ishaan Koradia from LinkedIn using static data"
-)
-def get_linkedin_education_tool() -> str:
-    """
-    Get LinkedIn education data for Ishaan Koradia using static data
-    """
-    if not LINKEDIN_DATA:
-        return json.dumps({
-            "error": "LinkedIn data not available",
-            "status": "error"
-        }, indent=2)
-    
-    education_profile = {
-        "name": f"{LINKEDIN_DATA.get('first_name', '')} {LINKEDIN_DATA.get('last_name', '')}".strip(),
-        "linkedin_url": f"https://www.linkedin.com/in/{LINKEDIN_DATA.get('public_identifier', 'ishaankoradia')}",
-        "profile_username": LINKEDIN_DATA.get("public_identifier", "ishaankoradia"),
-        "extraction_method": "static_linkedin_data",
-        "status": "success",
-        "education": []
-    }
-    
-    education_data = LINKEDIN_DATA.get("education", [])
-    for edu in education_data:
-        edu_data = {
-            "school": edu.get("school", ""),
-            "degree": edu.get("degree", ""),
-            "start_date": edu.get("start", ""),
-            "end_date": edu.get("end", "")
-        }
-        education_profile["education"].append(edu_data)
-    
-    education_profile["summary_stats"] = {
-        "total_education": len(education_profile["education"]),
-        "schools": list(set([edu.get("school", "") for edu in education_data if edu.get("school")])),
-        "degrees": [edu.get("degree", "") for edu in education_data if edu.get("degree")]
-    }
-    
-    return json.dumps(education_profile, indent=2)
-
-@mcp.tool(
-    name="get_ishaan_linkedin_skills",
-    description="Get skills and endorsements for Ishaan Koradia from LinkedIn using static data"
-)
-def get_linkedin_skills_tool() -> str:
-    """
-    Get LinkedIn skills data for Ishaan Koradia using static data
-    """
-    if not LINKEDIN_DATA:
-        return json.dumps({
-            "error": "LinkedIn data not available",
-            "status": "error"
-        }, indent=2)
-    
-    skills_profile = {
-        "name": f"{LINKEDIN_DATA.get('first_name', '')} {LINKEDIN_DATA.get('last_name', '')}".strip(),
-        "linkedin_url": f"https://www.linkedin.com/in/{LINKEDIN_DATA.get('public_identifier', 'ishaankoradia')}",
-        "profile_username": LINKEDIN_DATA.get("public_identifier", "ishaankoradia"),
-        "extraction_method": "static_linkedin_data",
-        "status": "success",
-        "skills": []
-    }
-    
-    skills_data = LINKEDIN_DATA.get("skills", [])
-    for skill in skills_data:
-        skill_data = {
-            "name": skill.get("name", ""),
-            "endorsement_count": skill.get("endorsement_count", 0),
-            "endorsed": skill.get("endorsed", False),
-            "insights": skill.get("insights", [])
-        }
-        skills_profile["skills"].append(skill_data)
-    
-    skills_profile["summary_stats"] = {
-        "total_skills": len(skills_profile["skills"]),
-        "total_endorsements": sum(skill.get("endorsement_count", 0) for skill in skills_data),
-        "top_skills": [skill.get("name", "") for skill in sorted(skills_data, key=lambda x: x.get("endorsement_count", 0), reverse=True)[:5]]
-    }
-    
-    return json.dumps(skills_profile, indent=2)
-
-@mcp.tool(
-    name="get_ishaan_linkedin_connections",
-    description="Get connections preview for Ishaan Koradia from LinkedIn using static data"
-)
-def get_linkedin_connections_tool() -> str:
-    """
-    Get LinkedIn connections data for Ishaan Koradia using static data
-    """
-    if not LINKEDIN_DATA:
-        return json.dumps({
-            "error": "LinkedIn data not available",
-            "status": "error"
-        }, indent=2)
-    
-    connections_profile = {
-        "name": f"{LINKEDIN_DATA.get('first_name', '')} {LINKEDIN_DATA.get('last_name', '')}".strip(),
-        "linkedin_url": f"https://www.linkedin.com/in/{LINKEDIN_DATA.get('public_identifier', 'ishaankoradia')}",
-        "profile_username": LINKEDIN_DATA.get("public_identifier", "ishaankoradia"),
-        "extraction_method": "static_linkedin_data",
-        "status": "success",
-        "connections_count": LINKEDIN_DATA.get("connections_count", 0),
-        "follower_count": LINKEDIN_DATA.get("follower_count", 0),
-        "connection_summary": {
-            "total_connections": LINKEDIN_DATA.get("connections_count", 0),
-            "followers": LINKEDIN_DATA.get("follower_count", 0),
-            "note": "Static data from LinkedIn profile export"
-        }
-    }
-    
-    return json.dumps(connections_profile, indent=2)
-
-@mcp.tool(
-    name="get_ishaan_linkedin_certifications",
-    description="Get certifications and licenses for Ishaan Koradia from LinkedIn using static data"
-)
-def get_linkedin_certifications_tool() -> str:
-    """
-    Get LinkedIn certifications data for Ishaan Koradia using static data
-    """
-    if not LINKEDIN_DATA:
-        return json.dumps({
-            "error": "LinkedIn data not available",
-            "status": "error"
-        }, indent=2)
-    
-    certifications_profile = {
-        "name": f"{LINKEDIN_DATA.get('first_name', '')} {LINKEDIN_DATA.get('last_name', '')}".strip(),
-        "linkedin_url": f"https://www.linkedin.com/in/{LINKEDIN_DATA.get('public_identifier', 'ishaankoradia')}",
-        "profile_username": LINKEDIN_DATA.get("public_identifier", "ishaankoradia"),
-        "extraction_method": "static_linkedin_data",
-        "status": "success",
-        "certifications": []
-    }
-    
-    certifications_data = LINKEDIN_DATA.get("certifications", [])
-    for cert in certifications_data:
-        cert_data = {
-            "name": cert.get("name", ""),
-            "organization": cert.get("organization", ""),
-            "url": cert.get("url", ""),
-            "credential_id": cert.get("credential_id", "")
-        }
-        certifications_profile["certifications"].append(cert_data)
-    
-    certifications_profile["summary_stats"] = {
-        "total_certifications": len(certifications_profile["certifications"]),
-        "organizations": list(set([cert.get("organization", "") for cert in certifications_data if cert.get("organization")])),
-        "has_urls": len([cert for cert in certifications_data if cert.get("url")]),
-        "google_certifications": len([cert for cert in certifications_data if "Google" in cert.get("organization", "")])
-    }
-    
-    return json.dumps(certifications_profile, indent=2)
-
-@mcp.tool(
-    name="get_ishaan_linkedin_activity",
-    description="Get recent activity and posts for Ishaan Koradia from LinkedIn using static data"
-)
-def get_linkedin_activity_tool() -> str:
-    """
-    Get LinkedIn activity data for Ishaan Koradia using static data (limited)
-    """
-    if not LINKEDIN_DATA:
-        return json.dumps({
-            "error": "LinkedIn data not available",
-            "status": "error"
-        }, indent=2)
-    
-    activity_profile = {
-        "name": f"{LINKEDIN_DATA.get('first_name', '')} {LINKEDIN_DATA.get('last_name', '')}".strip(),
-        "linkedin_url": f"https://www.linkedin.com/in/{LINKEDIN_DATA.get('public_identifier', 'ishaankoradia')}",
-        "profile_username": LINKEDIN_DATA.get("public_identifier", "ishaankoradia"),
-        "extraction_method": "static_linkedin_data",
-        "status": "limited",
-        "activity_note": "LinkedIn activity data is not included in static export",
-        "available_data": {
-            "hashtags": LINKEDIN_DATA.get("hashtags", []),
-            "volunteering_experience": LINKEDIN_DATA.get("volunteering_experience", []),
-            "recommendations_received": len(LINKEDIN_DATA.get("recommendations", {}).get("received", [])),
-            "recommendations_given": len(LINKEDIN_DATA.get("recommendations", {}).get("given", [])),
-            "projects": LINKEDIN_DATA.get("projects", [])
-        },
-        "summary_stats": {
-            "hashtags_count": len(LINKEDIN_DATA.get("hashtags", [])),
-            "volunteering_experiences": len(LINKEDIN_DATA.get("volunteering_experience", [])),
-            "total_recommendations": len(LINKEDIN_DATA.get("recommendations", {}).get("received", []) + LINKEDIN_DATA.get("recommendations", {}).get("given", []))
-        }
-    }
-    
-    return json.dumps(activity_profile, indent=2)
-
-def fetch_github_projects():
-    url = "https://api.github.com/users/ishaankor/repos"
-    headers = {
-        "Accept": "application/vnd.github+json",
-        "Authorization": f"Bearer {os.getenv('GITHUB_TOKEN')}",
-        "X-GitHub-Api-Version": "2022-11-28"
-    }
-    response = requests.get(url, headers=headers)
-    if response.status_code == 200:
-        projects = response.json()
-        return [
-            {
-                "name": project["name"],
-                "description": project.get("description", "No description provided"),
-                "url": project["html_url"],
-                "language": project.get("language", "Not specified"),
-                "stars": project.get("stargazers_count", 0),
-                "forks": project.get("forks_count", 0),
-                "created_at": project.get("created_at", "Unknown"),
-                "updated_at": project.get("updated_at", "Unknown"),
-                "topics": project.get("topics", []),
-                "homepage": project.get("homepage", None)
-            }
-            for project in projects
-        ]
-    return {"error": f"Failed to fetch projects: {response.status_code}"}
-
-@mcp.tool(
-    name="list_all_github_projects",
-    description="Lists ALL public GitHub repositories owned by Ishaan Koradia. Use ONLY if the user asks to see all projects that are NOT 'Transformi' nor 'Daily Motivation' nor 'NotesTaker'. Do NOT use for project details or structure—use get_github_project_details or list_project_files instead.",
-)
-def list_github_projects_tool():
-    projects = fetch_github_projects()
-    return json.dumps(projects, indent=2)
-
-def fuzzy_match_project(query, projects):
-    query = query.lower()
-    scored = [
-        (project, max(
-            fuzz.partial_ratio(query, project["name"].lower()),
-            fuzz.partial_ratio(query, (project.get("description") or "").lower())
-        ))
-        for project in projects
-    ]
-    scored.sort(key=lambda x: x[1], reverse=True)
-    matches = [project for project, score in scored if score > 60]
-    if matches:
-        best = matches[0]
-        return {
-            "name": best["name"],
-            "description": best.get("description", "No description provided"),
-            "url": best["html_url"],
-            "language": best.get("language", "Not specified"),
-            "stars": best.get("stargazers_count", 0),
-            "forks": best.get("forks_count", 0),
-            "created_at": best.get("created_at", "Unknown"),
-            "updated_at": best.get("updated_at", "Unknown"),
-            "topics": best.get("topics", []),
-            "homepage": best.get("homepage", None)
-        }
-    matches = [project for project in projects if query in project["name"].lower() or query in (project.get("description") or "").lower()]
-    if matches:
-        best = matches[0]
-        return {
-            "name": best["name"],
-            "description": best.get("description", "No description provided"),
-            "url": best["html_url"],
-            "language": best.get("language", "Not specified"),
-            "stars": best.get("stargazers_count", 0),
-            "forks": best.get("forks_count", 0),
-            "created_at": best.get("created_at", "Unknown"),
-            "updated_at": best.get("updated_at", "Unknown"),
-            "topics": best.get("topics", []),
-            "homepage": best.get("homepage", None)
-        }
-    return {"error": f"No matching project found for '{query}'. Please clarify or check the name."}
-
-def fetch_specific_github_project(project_name):
-    url = f"https://api.github.com/repos/ishaankor/{project_name}"
-    headers = {
-        "Accept": "application/vnd.github+json",
-        "Authorization": f"Bearer {os.getenv('GITHUB_TOKEN')}",
-        "X-GitHub-Api-Version": "2022-11-28"
-    }
-    response = requests.get(url, headers=headers)
-    if response.status_code == 200:
-        project = response.json()
-        return {
-            "name": project["name"],
-            "description": project.get("description", "No description provided"),
-            "url": project["html_url"],
-            "language": project.get("language", "Not specified"),
-            "stars": project.get("stargazers_count", 0),
-            "forks": project.get("forks_count", 0),
-            "created_at": project.get("created_at", "Unknown"),
-            "updated_at": project.get("updated_at", "Unknown"),
-            "topics": project.get("topics", []),
-            "homepage": project.get("homepage", None)
-        }
-    else:
-        projects_url = "https://api.github.com/users/ishaankor/repos"
-        headers = {
-            "Accept": "application/vnd.github+json",
-            "Authorization": f"Bearer {os.getenv('GITHUB_TOKEN')}",
-            "X-GitHub-Api-Version": "2022-11-28"
-        }
-        projects_resp = requests.get(projects_url, headers=headers)
-        if projects_resp.status_code == 200:
-            projects = projects_resp.json()
-            return fuzzy_match_project(project_name, projects)
-        return {"error": f"Failed to fetch projects for fuzzy search: {projects_resp.status_code}"}
-
-@mcp.tool(
-    name="get_github_project_details",
-    description="Returns detailed information about ONE project (name, description, URL, language, stars, forks, etc.) that's NOT 'Transformi', 'Daily Motivation', or 'NotesTaker'. Use for questions about a specific project, even with unknown names. Do NOT use for file structure or 'how he built it' queries —- use list_project_files or explain_project_build instead.",
-    annotations={
-        "project_name": "The GitHub project name, or partial/fuzzy name. E.g., 'personal website', 'mobile game', 'resume site'."
-    }
-)
-
-def get_specific_github_project_tool(project_name: str):
-    if not project_name:
-        return {"error": "project name must be provided."}
-    return fetch_specific_github_project(project_name)
-
-
-@mcp.tool(name="get_personal_website_project", description="Get details about Ishaan Koradia's personal website project, tech stack, and how he developed this project.")
-def get_personal_website_project_tool():
-    return personal_website_resource()
-
-def fetch_personal_website_project_details():
-    project_name = "my-personal-website"
-    url = f"https://api.github.com/repos/ishaankor/{project_name}"
-    readme_url = f"https://api.github.com/repos/ishaankor/{project_name}/readme"
-
-    headers = {
-        "Accept": "application/vnd.github+json",
-        "Authorization": f"Bearer {os.getenv('GITHUB_TOKEN')}",
-        "X-GitHub-Api-Version": "2022-11-28"
-    }
-
-    project_resp = requests.get(url, headers=headers)
-    readme_resp = requests.get(readme_url, headers=headers)
-    details = {}
-    if project_resp.status_code == 200:
-        project = project_resp.json()
-        details = {
-            "name": project["name"],
-            "description": project.get("description", "No description provided"),
-            "url": project["html_url"],
-            "language": project.get("language", "Not specified"),
-            "stars": project.get("stargazers_count", 0),
-            "forks": project.get("forks_count", 0),
-            "created_at": project.get("created_at", "Unknown"),
-            "updated_at": project.get("updated_at", "Unknown"),
-            "topics": project.get("topics", []),
-            "homepage": project.get("homepage", None)
-        }
-    if readme_resp.status_code == 200:
-        details["readme"] = readme_resp.text
-    else:
-        details["readme"] = "README not found."
-    return json.dumps(details, indent=2)
-
-@mcp.tool(
-    name="analyze_personal_website_project",
-    description=(
-        "Fetches the metadata and README of Ishaan Koradia's personal website project. "
-        "Use when the user asks about the website’s structure, purpose, tech stack, or how it was built."
-    )
-)
-def analyze_personal_website_project_tool():
-    return fetch_personal_website_project_details()
-
-@mcp.tool(
-    name="list_project_files",
-    description="Lists files and folders inside a GitHub project. Use ONLY for questions about project structure, file organization, or to see the contents of a repo. Do NOT use for general project info or build explanations—use get_github_project_details or explain_project_build instead.",
-    annotations={
-        "project_name": "Name of the GitHub repo (e.g., 'personal-website')",
-        "path": "Optional sub-path to list contents inside a folder (e.g., 'src/')"
-    }
-)
-def list_project_files(project_name: str, path: str = ""):
-    if not project_name:
-        return {"error": "project name must be provided."}
-    url = f"https://api.github.com/repos/ishaankor/{project_name}/contents/{path}" if path else f"https://api.github.com/repos/ishaankor/{project_name}/contents/"
-
-    headers = {
-        "Accept": "application/vnd.github+json",
-        "Authorization": f"Bearer {os.getenv('GITHUB_TOKEN')}",
-        "X-GitHub-Api-Version": "2022-11-28"
-    }
-
-    response = requests.get(url, headers=headers)
-    if response.status_code == 200:
-        items = response.json()
-        if isinstance(items, dict):
-            return {
-                "name": items.get("name"),
-                "type": items.get("type"),
-                "download_url": items.get("download_url"),
-                "size": items.get("size"),
-                "content": items.get("content", "")
-            }
-        else:
-            return [
-                {
-                    "name": item.get("name"),
-                    "type": item.get("type"),
-                    "download_url": item.get("download_url"),
-                    "size": item.get("size")
-                }
-                for item in items
-            ]
-    projects_url = "https://api.github.com/users/ishaankor/repos"
-    headers = {
-        "Accept": "application/vnd.github+json",
-        "Authorization": f"Bearer {os.getenv('GITHUB_TOKEN')}",
-        "X-GitHub-Api-Version": "2022-11-28"
-    }
-    projects_resp = requests.get(projects_url, headers=headers)
-    if projects_resp.status_code == 200:
-        projects = projects_resp.json()
-        match = fuzzy_match_project(project_name, projects)
-        if "name" in match:
-            url = f"https://api.github.com/repos/ishaankor/{match['name']}/contents/{path}" if path else f"https://api.github.com/repos/ishaankor/{match['name']}/contents/"
-            response = requests.get(url, headers=headers)
-            if response.status_code == 200:
-                items = response.json()
-                if isinstance(items, dict):
+    try:
+        req = urllib.request.Request("https://api.spotify.com/v1/me/player/currently-playing", headers={
+            "Authorization": f"Bearer {token}"
+        })
+        with urllib.request.urlopen(req, context=ctx, timeout=8) as resp:
+            if resp.status == 200:
+                data = json.loads(resp.read().decode())
+                item = data.get("item")
+                if item:
+                    album = item.get("album", {})
+                    images = album.get("images", [])
                     return {
-                        "name": items.get("name"),
-                        "type": items.get("type"),
-                        "download_url": items.get("download_url"),
-                        "size": items.get("size"),
-                        "content": items.get("content", "")
+                        "isPlaying": data.get("is_playing", False),
+                        "title": item.get("name"),
+                        "artist": ", ".join(a.get("name", "") for a in item.get("artists", [])),
+                        "album": album.get("name", ""),
+                        "albumImageUrl": images[0].get("url") if images else None,
+                        "songUrl": item.get("external_urls", {}).get("spotify"),
+                        "progressMs": data.get("progress_ms"),
+                        "durationMs": item.get("duration_ms"),
                     }
-                else:
-                    return [
-                        {
-                            "name": item.get("name"),
-                            "type": item.get("type"),
-                            "download_url": item.get("download_url"),
-                            "size": item.get("size")
-                        }
-                        for item in items
-                    ]
-        return match
-    return {"error": f"Failed to fetch contents: {response.status_code}"}
+    except Exception:
+        pass
+        
+    try:
+        req = urllib.request.Request("https://api.spotify.com/v1/me/player/recently-played?limit=1", headers={
+            "Authorization": f"Bearer {token}"
+        })
+        with urllib.request.urlopen(req, context=ctx, timeout=8) as resp:
+            if resp.status == 200:
+                data = json.loads(resp.read().decode())
+                items = data.get("items", [])
+                if items:
+                    track = items[0].get("track", {})
+                    album = track.get("album", {})
+                    images = album.get("images", [])
+                    return {
+                        "isPlaying": False,
+                        "recentlyPlayed": True,
+                        "title": track.get("name"),
+                        "artist": ", ".join(a.get("name", "") for a in track.get("artists", [])),
+                        "album": album.get("name", ""),
+                        "albumImageUrl": images[0].get("url") if images else None,
+                        "songUrl": track.get("external_urls", {}).get("spotify"),
+                    }
+    except Exception as e:
+        print(f"[Spotify] Error fetching recently played: {e}")
+        
+    return {"isPlaying": False}
 
-@mcp.tool(
-    name="explain_project_build",
-    description=(
-        "Explains how a GitHub project was built, using its README and file structure. Use ONLY for questions about the build process, tech stack, or how a project was developed. Do NOT use for general info or file listing—use get_github_project_details or list_project_files instead."
-    ),
-    annotations={
-        "project_name": "The project name (can be partial or fuzzy)."
-    }
-)
-def explain_project_build_tool(project_name: str):
-    if not project_name:
-        return {"error": "Project name must be provided."}
-    projects_url = "https://api.github.com/users/ishaankor/repos"
+@mcp.custom_route("/spotify", methods=["GET", "HEAD", "OPTIONS"])
+async def spotify_route(request: Request):
     headers = {
-        "Accept": "application/vnd.github+json",
-        "Authorization": f"Bearer {os.getenv('GITHUB_TOKEN')}",
-        "X-GitHub-Api-Version": "2022-11-28"
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
+        "Access-Control-Allow-Headers": "*"
     }
-    projects_resp = requests.get(projects_url, headers=headers)
-    if projects_resp.status_code == 200:
-        projects = projects_resp.json()
-        match = fuzzy_match_project(project_name, projects)
-        if "name" in match:
-            repo_name = match["name"]
-        else:
-            return match
-    else:
-        repo_name = project_name
-    url = f"https://api.github.com/repos/ishaankor/{repo_name}"
-    readme_url = f"https://api.github.com/repos/ishaankor/{repo_name}/readme"
-    contents_url = f"https://api.github.com/repos/ishaankor/{repo_name}/contents/"
-    project_resp = requests.get(url, headers=headers)
-    readme_resp = requests.get(readme_url, headers=headers)
-    contents_resp = requests.get(contents_url, headers=headers)
-    summary = {}
-    if project_resp.status_code == 200:
-        project = project_resp.json()
-        summary["name"] = project["name"]
-        summary["description"] = project.get("description", "No description provided")
-        summary["url"] = project["html_url"]
-        summary["language"] = project.get("language", "Not specified")
-        summary["topics"] = project.get("topics", [])
-    if readme_resp.status_code == 200:
-        summary["readme"] = readme_resp.text
-    else:
-        summary["readme"] = "README not found."
-    if contents_resp.status_code == 200:
-        files = contents_resp.json()
-        summary["files"] = [file["name"] for file in files if "name" in file]
-    else:
-        summary["files"] = []
-    return json.dumps(summary, indent=2)
+    if request.method == "OPTIONS":
+        return JSONResponse({}, headers=headers)
+    data = get_spotify_playback()
+    return JSONResponse(data, headers=headers)
 
-@mcp.tool(
-    name="read_all_repo_files",
-    description="Reads ALL files from a GitHub repository automatically. Fetches the content of all text files in the repo to understand the complete project structure and how it was built.",
-    annotations={
-        "project_name": "The GitHub project name (can be partial or fuzzy, e.g., 'ratings recipe', 'personal website')"
-    }
-)
-def read_all_repo_files_tool(project_name: str):
-    if not project_name:
-        return {"error": "Project name must be provided."}
-    
-    projects_url = "https://api.github.com/users/ishaankor/repos"
-    headers = {
-        "Accept": "application/vnd.github+json",
-        "Authorization": f"Bearer {os.getenv('GITHUB_TOKEN')}",
-        "X-GitHub-Api-Version": "2022-11-28"
-    }
-    projects_resp = requests.get(projects_url, headers=headers)
 
-    if projects_resp.status_code == 200:
-        projects = projects_resp.json()
-        match = fuzzy_match_project(project_name, projects)
-        if "name" in match:
-            repo_name = match["name"]
-        else:
-            return match
-    else:
-        repo_name = project_name
-    
-    def get_all_files(path=""):
-        """Recursively get all files from the repository"""
-        url = f"https://api.github.com/repos/ishaankor/{repo_name}/contents/{path}" if path else f"https://api.github.com/repos/ishaankor/{repo_name}/contents/"
-        headers = {
-            "Accept": "application/vnd.github+json",
-            "Authorization": f"Bearer {os.getenv('GITHUB_TOKEN')}",
-            "X-GitHub-Api-Version": "2022-11-28"
-        }
-        response = requests.get(url, headers=headers)
+DATA_DIR = Path("./data")
+GITHUB_USERNAME = "ishaankor"
+CACHE_TTL = 300
 
-        if response.status_code != 200:
-            return []
-        
-        files = []
-        items = response.json()
-        
-        for item in items:
-            if item["type"] == "file":
-                files.append(item)
-            elif item["type"] == "dir":
-                sub_files = get_all_files(item["path"])
-                files.extend(sub_files)
-        
-        return files
-    
-    all_files = get_all_files()
-    
-    if not all_files:
-        return {"error": f"No files found in repository '{repo_name}' or repository doesn't exist"}
-    
-    repo_content = {
-        "project": repo_name,
-        "total_files": len(all_files),
-        "files": {}
-    }
-    
-    readable_extensions = {
-        '.py', '.js', '.ts', '.css', '.json', '.md', '.txt', '.yml', '.yaml', 
-        '.xml', '.sql', '.sh', '.bash', '.env', '.gitignore', '.dockerfile', '.toml',
-        '.ini', '.cfg', '.conf', '.csv', '.jsx', '.tsx', '.vue', '.php', 
-        '.rb', '.go', '.java', '.cpp', '.c', '.h', '.cs', '.swift', '.kt', '.rs',
-        '.r', '.scala', '.clj', '.hs', '.elm', '.dart', '.lua', '.pl', '.ps1'
-    }
-    
-    excluded_patterns = {
-        'graph.html', 'chart.html', '_graph.html', '_chart.html', 'plot.html',
-        'visualization.html', 'vis.html', '.ipynb_checkpoints', '__pycache__',
-        '.pyc', '.pyo', '.class', '.o', '.obj', '.dll', '.so', '.dylib',
-        'node_modules', '.git', '.DS_Store', 'Thumbs.db'
-    }
-    
-    for file_info in all_files:
-        file_path = file_info["path"]
-        file_name = file_info["name"]
-        file_size = file_info["size"]
-        
-        if any(pattern in file_name.lower() or pattern in file_path.lower() for pattern in excluded_patterns):
-            repo_content["files"][file_path] = {
-                "name": file_name,
-                "size": file_size,
-                "content": f"[Excluded file: {file_name}]",
-                "type": "excluded"
-            }
-            continue
-        
-        if file_size > 50000:
-            repo_content["files"][file_path] = {
-                "name": file_name,
-                "size": file_size,
-                "content": f"[File too large to display: {file_size} bytes]",
-                "type": "large_file"
-            }
-            continue
-        
-        _, ext = os.path.splitext(file_name.lower())
-        if ext not in readable_extensions and not any(name in file_name.lower() for name in ['readme', 'license', 'changelog', 'makefile', 'dockerfile']):
-            repo_content["files"][file_path] = {
-                "name": file_name,
-                "size": file_size,
-                "content": f"[Binary file not displayed]",
-                "type": "binary"
-            }
-            continue
-        
-        file_url = f"https://api.github.com/repos/ishaankor/{repo_name}/contents/{file_path}"
+# ---------------------------------------------------------------------------
+# CORE DATA STRUCTURES
+# ---------------------------------------------------------------------------
 
-        file_response = requests.get(file_url, headers=headers)
+@dataclass
+class Document:
+    """Unified data structure for all indexed knowledge base elements."""
+    id: str
+    category: str
+    source: str
+    content: str
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
-        if file_response.status_code == 200:
-            content = file_response.text
-            repo_content["files"][file_path] = {
-                "name": file_name,
-                "size": file_size,
-                "content": content,
-                "type": "text",
-                "extension": ext
-            }
-        else:
-            repo_content["files"][file_path] = {
-                "name": file_name,
-                "size": file_size,
-                "content": f"[Error reading file: {file_response.status_code}]",
-                "type": "error"
-            }
-    
-    return json.dumps(repo_content, indent=2)
+_REPO_API_CACHE: Optional[List[Dict]] = None
+_REPO_API_CACHE_TIME: float = 0.0
+_README_CACHE: Dict[str, Tuple[str, float]] = {}
 
-@mcp.tool(
-    name="get_project_pages",
-    description="Reads content from his deployed projects and websites to understand how they work and what they contain about the project's final output.",
-    annotations={
-        "project_name": "The project name (e.g., 'my-personal-website', 'data-science-portfolio', 'ratings-recipe-analysis') but it CAN BE a partial or fuzzy name",
-        "path": "Optional. Specific path on the site (e.g., '/about', '/projects/demo.html'). Default: root page"
-    }
-)
-def get_project_pages(project_name: str, path: str = ""):
-    if not project_name:
-        return json.dumps({"error": "Project name must be provided."}, indent=2)
-    
-    projects_url = "https://api.github.com/users/ishaankor/repos"
-    headers = {
-        "Accept": "application/vnd.github+json",
-        "Authorization": f"Bearer {os.getenv('GITHUB_TOKEN')}",
-        "X-GitHub-Api-Version": "2022-11-28"
-    }
-    projects_resp = requests.get(projects_url, headers=headers)
+_STATIC_DOCS_BY_CAT: Dict[str, List[Document]] = {"education": [], "experience": [], "biography": [], "projects": [], "certifications": [], "languages": [], "skills": [], "profile": []}
+_STATIC_BUILT: bool = False
+_BM25_INDEXES: Dict[str, 'PreindexedBM25'] = {}
+_DYNAMIC_KB_TIME: float = 0.0
 
-    actual_project_name = project_name
+# ---------------------------------------------------------------------------
+# WEIGHTED SYNONYMS & EXPANSION MAP
+# ---------------------------------------------------------------------------
+
+WEIGHTED_SYNONYM_GROUPS = {
+    "major": {"degree": 2, "bs": 2, "study": 1, "education": 1, "specialization": 1},
+    "minor": {"study": 1, "education": 1},
+    "college": {"university": 2, "school": 2, "ucsd": 2, "uc san diego": 2, "high school": 1},
+    "job": {"position": 2, "role": 2, "career": 1, "experience": 1, "work": 1, "internship": 1, "engineer": 1},
+    "built": {"project": 2, "created": 2, "developed": 2, "repo": 1, "bot": 1, "website": 1, "game": 1, "clone": 1},
+    "certification": {"certificate": 2, "certifications": 2, "certificates": 2, "cert": 2, "certs": 2, "credential": 2, "credentials": 2, "course": 1, "training": 1, "google": 1},
+    "skill": {"skills": 3, "technology": 2, "tool": 1, "framework": 1},
+    "language": {"languages": 3, "speak": 2, "speaks": 2, "spoken": 2, "fluent": 2, "bilingual": 2, "native": 1},
+}
+
+EXPANSION_MAP: Dict[str, List[Tuple[str, int]]] = {}
+
+_temp_map = {}
+for base, syns in WEIGHTED_SYNONYM_GROUPS.items():
+    if base not in _temp_map:
+        _temp_map[base] = {}
+    for word, weight in syns.items():
+        _temp_map[base][word] = max(_temp_map[base].get(word, 0), weight)
+        if word not in _temp_map:
+            _temp_map[word] = {}
+        _temp_map[word][base] = max(_temp_map[word].get(base, 0), 1)
+
+for word, syns in _temp_map.items():
+    EXPANSION_MAP[word] = [(s, w) for s, w in syns.items()]
+
+
+# ---------------------------------------------------------------------------
+# DATA LOADING & RESOLUTION UTILS
+# ---------------------------------------------------------------------------
+
+def load_json_file(filename: str) -> Dict:
+    filepath = DATA_DIR / filename
+    if filepath.exists():
+        with open(filepath, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    return {}
+
+def load_text_file(filename: str) -> str:
+    filepath = DATA_DIR / filename
+    if filepath.exists():
+        return filepath.read_text(encoding='utf-8')
+    return ""
+
+def resolve_project_name(query_name: str, repos: List[Dict]) -> Optional[str]:
+    """Resolves project queries using an Alias -> Exact -> Fuzzy matching hierarchy."""
+    query_lower = query_name.lower()
+    keywords_map = load_json_file("project_keywords.json").get("project_keywords", {})
     
-    if projects_resp.status_code == 200:
-        projects = projects_resp.json()
-        match = fuzzy_match_project(project_name, projects)
-        if "name" in match:
-            actual_project_name = match["name"]
-            potential_names = [
-                match["name"],
-                match["name"].replace("_", "-"),
-                match["name"].replace("-", "_"),
-                match["name"].lower(),
-                match["name"].replace(" ", "-").lower()
-            ]
-        else:
-            potential_names = [
-                project_name,
-                project_name.replace("_", "-"),
-                project_name.replace("-", "_"),
-                project_name.lower(),
-                project_name.replace(" ", "-").lower()
-            ]
-    else:
-        potential_names = [
-            project_name,
-            project_name.replace("_", "-"),
-            project_name.replace("-", "_"),
-            project_name.lower(),
-            project_name.replace(" ", "-").lower()
-        ]
-    
-    last_error = None
-    for name_attempt in potential_names:
-        base_url = f"https://ishaankor.github.io/{name_attempt}"
-        if path:
-            if not path.startswith('/'):
-                path = '/' + path
-            url = base_url + path
-        else:
-            url = base_url
-        
-        try:
-            headers = {
-                "Accept": "application/vnd.github+json",
-                "Authorization": f"Bearer {os.getenv('GITHUB_TOKEN')}",
-                "X-GitHub-Api-Version": "2022-11-28",
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-            }
+    for alias_key, repo_list in keywords_map.items():
+        if query_lower == alias_key.lower() and repo_list:
+            return repo_list[0]
             
-            response = requests.get(url, headers=headers, timeout=10)
+    repo_names = [r.get("name", "") for r in repos]
+    
+    for name in repo_names:
+        if name.lower() == query_lower:
+            return name
             
-            if response.status_code == 200:
-                try:
-                    from bs4 import BeautifulSoup
-                    soup = BeautifulSoup(response.content, 'html.parser')
-                    
-                    for script in soup(["script", "style"]):
-                        script.decompose()
-                    
-                    text_content = soup.get_text()
-                    
-                    lines = (line.strip() for line in text_content.splitlines())
-                    chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
-                    text_content = '\n'.join(chunk for chunk in chunks if chunk)
-                    
-                    return json.dumps({
-                        "project": name_attempt,
-                        "original_query": project_name,
-                        "url": url,
-                        "status_code": response.status_code,
-                        "content": text_content,
-                        "content_length": len(text_content),
-                        "extraction_method": "BeautifulSoup (text only)"
-                    }, indent=2)
-                    
-                except ImportError:
-                    import re
-                    html_content = response.text
-                    
-                    html_content = re.sub(r'<script.*?</script>', '', html_content, flags=re.DOTALL | re.IGNORECASE)
-                    html_content = re.sub(r'<style.*?</style>', '', html_content, flags=re.DOTALL | re.IGNORECASE)
-                    
-                    text_content = re.sub(r'<[^>]+>', '', html_content)
-                    
-                    text_content = re.sub(r'\s+', ' ', text_content).strip()
-                    
-                    return json.dumps({
-                        "project": name_attempt,
-                        "original_query": project_name,
-                        "url": url,
-                        "status_code": response.status_code,
-                        "content": text_content,
-                        "content_length": len(text_content),
-                        "extraction_method": "Regex (text only)"
-                    }, indent=2)
+    matches = difflib.get_close_matches(query_name, repo_names, n=1, cutoff=0.4)
+    if matches:
+        return matches[0]
+        
+    return None
+
+# ---------------------------------------------------------------------------
+# GITHUB DATA MINING & CONCURRENT RETRIEVAL
+# ---------------------------------------------------------------------------
+
+def fetch_live_github_repos() -> List[Dict]:
+    global _REPO_API_CACHE, _REPO_API_CACHE_TIME
+    current_time = time.time()
+    
+    if _REPO_API_CACHE and (current_time - _REPO_API_CACHE_TIME < CACHE_TTL):
+        return _REPO_API_CACHE
+        
+    url = f"https://api.github.com/users/{GITHUB_USERNAME}/repos?per_page=100&sort=updated"
+    req = urllib.request.Request(url, headers={'User-Agent': 'MCP-Portfolio-Server'})
+    try:
+        with urllib.request.urlopen(req) as response:
+            _REPO_API_CACHE = json.loads(response.read().decode())
+            _REPO_API_CACHE_TIME = current_time
+            return _REPO_API_CACHE
+    except urllib.error.URLError as e:
+        print(f"GitHub API fetch failed: {e}")
+        return _REPO_API_CACHE if _REPO_API_CACHE else []
+
+def _fetch_url(url: str) -> Optional[str]:
+    """Helper for threaded README fetching."""
+    req = urllib.request.Request(url, headers={'User-Agent': 'MCP-Portfolio-Server'})
+    try:
+        with urllib.request.urlopen(req) as response:
+            return response.read().decode()
+    except urllib.error.HTTPError:
+        return None
+
+def fetch_live_readme(repo_name: str) -> str:
+    """Fetches README data using thread pooling to check branches concurrently, cached via TTL."""
+    current_time = time.time()
+    if repo_name in _README_CACHE and (current_time - _README_CACHE[repo_name][1] < CACHE_TTL):
+        return _README_CACHE[repo_name][0]
+
+    urls = [
+        f"https://raw.githubusercontent.com/{GITHUB_USERNAME}/{repo_name}/main/README.md",
+        f"https://raw.githubusercontent.com/{GITHUB_USERNAME}/{repo_name}/master/README.md"
+    ]
+    
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = {executor.submit(_fetch_url, url): url for url in urls}
+        for future in as_completed(futures):
+            result = future.result()
+            if result:
+                _README_CACHE[repo_name] = (result, current_time)
+                return result
+
+    _README_CACHE[repo_name] = ("", current_time)
+    return ""
+
+def _chunk_readme_text(readme_text: str, repo_name: str) -> List[Document]:
+    """Partitions markdown files cleanly using regex-based hierarchy preservation."""
+    chunks = []
+    current_section = "Overview"
+    current_content = []
+    
+    for line in readme_text.split("\n"):
+        if re.match(r"^#{1,6}\s", line):
+            if current_content:
+                chunks.append(Document(
+                    id=f"{repo_name}_{uuid.uuid4().hex[:6]}",
+                    category="projects",
+                    source=f"README: {repo_name} - {current_section}",
+                    content="\n".join(current_content).strip(),
+                    metadata={"repository": repo_name, "section": current_section}
+                ))
+            current_section = re.sub(r"^#{1,6}\s", "", line).strip()
+            current_content = [line]
+        else:
+            current_content.append(line)
             
-            elif response.status_code == 404:
-                last_error = f"Project '{name_attempt}' not found on GitHub Pages"
-                continue
-            else:
-                last_error = f"HTTP {response.status_code} for '{name_attempt}'"
-                continue
+    if current_content:
+        chunks.append(Document(
+            id=f"{repo_name}_{uuid.uuid4().hex[:6]}",
+            category="projects",
+            source=f"README: {repo_name} - {current_section}",
+            content="\n".join(current_content).strip(),
+            metadata={"repository": repo_name, "section": current_section}
+        ))
+    return chunks
+
+# ---------------------------------------------------------------------------
+# OPTIMIZED NATIVE BM25 ENGINE
+# ---------------------------------------------------------------------------
+
+def _tokenize(text: str) -> List[str]:
+    """Tokenizes text while splitting camelCase words (e.g., DataCamp -> data camp)."""
+    camel_split = re.sub(r'([a-z0-9])([A-Z])', r'\1 \2', str(text))
+    return re.findall(r'\w+', camel_split.lower())
+
+class PreindexedBM25:
+    """Highly efficient BM25 ranking engine featuring O(1) Counter and Phrase Boosting."""
+    def __init__(self, corpus: List[Document]):
+        self.corpus = corpus
+        self.doc_count = len(corpus)
+        self.tokenized_docs = [_tokenize(doc.content) for doc in corpus]
+        self.doc_lengths = [len(doc) for doc in self.tokenized_docs]
+        self.avg_doc_len = sum(self.doc_lengths) / self.doc_count if self.doc_count > 0 else 1.0
+        
+        self.doc_counters = [Counter(doc) for doc in self.tokenized_docs]
+        self.df: Dict[str, int] = {}
+        for doc in self.tokenized_docs:
+            for token in set(doc):
+                self.df[token] = self.df.get(token, 0) + 1
                 
-        except requests.exceptions.RequestException as e:
-            last_error = f"Network error for '{name_attempt}': {str(e)}"
-            continue
-        except Exception as e:
-            last_error = f"Unexpected error for '{name_attempt}': {str(e)}"
-            continue
-    
-    return json.dumps({
-        "error": f"Could not find GitHub Pages site for project matching '{project_name}'. Tried: {', '.join(potential_names)}",
-        "last_error": last_error,
-        "original_query": project_name,
-        "attempted_names": potential_names,
-        "suggestion": "Check if the project has GitHub Pages enabled or try a more specific project name"
-    }, indent=2)
+        self.k1 = 1.5
+        self.b = 0.75
 
+    def score(self, query_tokens: List[str], raw_query_string: str = "") -> List[Tuple[Document, float]]:
+        scores = []
+        
+        for index, counts in enumerate(self.doc_counters):
+            score = 0.0
+            doc_len = self.doc_lengths[index]
+            
+            for token in query_tokens:
+                tf = counts.get(token, 0)
+                if tf == 0:
+                    continue
+                df_val = self.df.get(token, 0)
+                idf = math.log((self.doc_count - df_val + 0.5) / (df_val + 0.5) + 1.0)
+                numerator = tf * (self.k1 + 1)
+                denominator = tf + self.k1 * (1 - self.b + self.b * (doc_len / self.avg_doc_len))
+                score += idf * (numerator / denominator)
+            
+            if raw_query_string and len(raw_query_string.split()) > 1 and raw_query_string in self.corpus[index].content.lower():
+                score += 3.0
+                
+            scores.append((self.corpus[index], score))
+        return scores
+
+# ---------------------------------------------------------------------------
+# INCREMENTAL KNOWLEDGE BASE
+# ---------------------------------------------------------------------------
+
+def _build_static_kb():
+    """Compiles local static sources once during system lifetime."""
+    global _STATIC_BUILT, _BM25_INDEXES
+    
+    linkedin = load_json_file("linkedin_data.json")
+    contact = linkedin.get("contact_info", {})
+    emails = ", ".join(contact.get("emails", []))
+    
+    content_str = (
+        f"Based / Profile Location: {linkedin.get('location', '')}. "
+        f"Followers / Follower count: {linkedin.get('follower_count', 0)}. "
+        f"Connections / Connection count: {linkedin.get('connections_count', 0)}. "
+        f"Contact email: {emails}."
+        f"Website / Websites: {', '.join(linkedin.get('websites', []))}."
+    )
+    
+    _STATIC_DOCS_BY_CAT["profile"].append(Document(
+        id=uuid.uuid4().hex, 
+        category="profile", 
+        source="LinkedIn",
+        content=content_str
+    ))
+
+    for edu in linkedin.get("education", []):
+        priority = 10 if "UC San Diego" in edu.get('school', '') or "California" in edu.get('school', '') else 5
+        
+        _STATIC_DOCS_BY_CAT["education"].append(Document(
+            id=uuid.uuid4().hex, 
+            category="education", 
+            source="LinkedIn",
+            content=f"School: {edu.get('school')}. Degree: {edu.get('degree')}. Timeline: {edu.get('start')} - {edu.get('end')}.",
+            metadata={"priority": priority}
+        ))
+    for job in linkedin.get("work_experience", []):
+        _STATIC_DOCS_BY_CAT["experience"].append(Document(
+            id=uuid.uuid4().hex, category="experience", source="LinkedIn",
+            content=f"Company: {job.get('company')}. Position: {job.get('position')}. Description: {job.get('description')}."
+        ))
+    for cert in linkedin.get("certifications", []):
+        _STATIC_DOCS_BY_CAT["certifications"].append(Document(
+            id=uuid.uuid4().hex, 
+            category="certifications", 
+            source="LinkedIn",
+            content=f"Certification / Credential: {cert.get('name', '')} issued by {cert.get('organization', '')}.",
+            metadata={"url": cert.get("url", "")}
+        ))
+    
+    for lang in linkedin.get("languages", []):
+        if isinstance(lang, dict):
+            lang_name = lang.get('name', '')
+            prof = lang.get('proficiency', '')
+        else:
+            lang_name = str(lang)
+            prof = "Spoken"
+            
+        _STATIC_DOCS_BY_CAT["languages"].append(Document(
+            id=uuid.uuid4().hex, 
+            category="languages", 
+            source="LinkedIn",
+            content=(
+                f"Spoken language: {lang_name}. "
+                f"Language spoken by Ishaan Koradia. "
+                f"Speaks {lang_name}. "
+                f"Proficiency: {prof}."
+            ),
+        ))
+    
+    for skill in linkedin.get("skills", []):
+        _STATIC_DOCS_BY_CAT["skills"].append(Document(
+            id=uuid.uuid4().hex, 
+            category="skills", 
+            source="LinkedIn",
+            content=f"Skill / Skills: {skill.get('name', '')}. Endorsement(s): {skill.get('endorsement_count', '')}.",
+        ))
+        
+    _STATIC_DOCS_BY_CAT["biography"].append(Document(
+        id=uuid.uuid4().hex, category="biography", source="about_me.txt", content=load_text_file("about_me.txt")
+    ))
+    _BM25_INDEXES["profile"] = PreindexedBM25(_STATIC_DOCS_BY_CAT["profile"])
+    _BM25_INDEXES["education"] = PreindexedBM25(_STATIC_DOCS_BY_CAT["education"])
+    _BM25_INDEXES["experience"] = PreindexedBM25(_STATIC_DOCS_BY_CAT["experience"])
+    _BM25_INDEXES["certifications"] = PreindexedBM25(_STATIC_DOCS_BY_CAT["certifications"])
+    _BM25_INDEXES["biography"] = PreindexedBM25(_STATIC_DOCS_BY_CAT["biography"])
+    _BM25_INDEXES["languages"] = PreindexedBM25(_STATIC_DOCS_BY_CAT["languages"])
+    _BM25_INDEXES["skills"] = PreindexedBM25(_STATIC_DOCS_BY_CAT["skills"])
+    _STATIC_BUILT = True
+
+def get_indexed_kb() -> Dict[str, PreindexedBM25]:
+    """Retrieves cached indexes, incrementally merging dynamic GitHub data via TTL."""
+    global _DYNAMIC_KB_TIME, _BM25_INDEXES
+    if not _STATIC_BUILT:
+        _build_static_kb()
+
+    current_time = time.time()
+    if "projects" not in _BM25_INDEXES or (current_time - _DYNAMIC_KB_TIME > CACHE_TTL):
+        dynamic_projects = []
+        for repo in fetch_live_github_repos():
+            dynamic_projects.append(Document(
+                id=repo.get("name", ""),
+                category="projects",
+                source=f"GitHub API - {repo.get('name')}",
+                content=f"Repository: {repo.get('name')}. Language: {repo.get('language')}. Overview: {repo.get('description')}.",
+                metadata={"url": repo.get("html_url"), "stars": repo.get("stargazers_count")}
+            ))
+            
+        combined_projects = _STATIC_DOCS_BY_CAT["projects"] + dynamic_projects
+        _BM25_INDEXES["projects"] = PreindexedBM25(combined_projects)
+        _DYNAMIC_KB_TIME = current_time
+
+    return _BM25_INDEXES
+
+# ---------------------------------------------------------------------------
+# CORE EXPOSED MCP SYSTEM TOOLS
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def search_ishaan(query: str) -> Dict[str, Any]:
+    """Unified retrieval pipeline with Intent-Based Pre-Routing."""
+    indexes = get_indexed_kb()
+    DOMAIN_STOP_WORDS = {"ishaan", "koradia", "he", "his", "him", "tell", "me", "about", "what", "are", "does", "have", "has", "is", "any"}
+    
+    raw_tokens = _tokenize(query)
+    query_tokens = [t for t in raw_tokens if t not in DOMAIN_STOP_WORDS]
+    
+    if not query_tokens:
+        query_tokens = raw_tokens
+        
+    query_lower = query.lower()
+    query_token_set = set(query_tokens)
+    
+    CATEGORY_KEYWORDS = {
+        "languages": {"language", "languages", "speak", "speaks", "spoken", "fluent", "bilingual", "native"},
+        "certifications": {"certificate", "certification", "certifications", "certificates", "credential", "credentials", "course", "training", "cert", "certs"},
+        "skills": {"skill", "skills", "technology", "technologies", "framework", "frameworks", "tool", "tools", "programming", "stack", "code", "coding", "program", "language", "languages"},
+        "education": {"education", "university", "college", "school", "degree", "major", "minor", "ucsd", "study"},
+        "experience": {"experience", "job", "position", "role", "work", "internship", "career", "company"},
+        "projects": {"project", "projects", "built", "repo", "github", "website", "app", "bot", "game"},
+        "profile": {"location", "email", "contact", "follower", "followers", "connections", "connect"}
+    }
+    
+    target_categories = set()
+    for category, keywords in CATEGORY_KEYWORDS.items():
+        if query_token_set & keywords:
+            target_categories.add(category)
+            
+    if not target_categories:
+        target_categories = set(indexes.keys())
+        
+    target_categories.add("biography")
+
+    expanded_list = []
+    for token in query_tokens:
+        expanded_list.extend([token] * 3)
+        for synonym, weight in EXPANSION_MAP.get(token, []):
+            expanded_list.extend([synonym] * weight)
+
+    all_scored_docs = []
+    
+    # 🎯 Only search the pre-routed target categories
+    for cat in target_categories:
+        if cat in indexes:
+            ranker = indexes[cat]
+            scored_docs = ranker.score(expanded_list, raw_query_string=query_lower)
+            
+            # Apply Metadata Priority Boost
+            boosted_docs = []
+            for doc, score in scored_docs:
+                priority = doc.metadata.get("priority", 1)
+                final_score = score * (1 + (priority / 10))
+                boosted_docs.append((doc, final_score))
+                
+            all_scored_docs.extend(boosted_docs)
+
+    all_scored_docs.sort(key=lambda x: x[1], reverse=True)
+
+    valid_matches = [res for res in all_scored_docs if res[1] > 0.0]
+    top_matches = []
+    
+    if valid_matches:
+        MINIMUM_CONFIDENCE_FLOOR = 0.5 
+        top_matches = [res for res in valid_matches if res[1] >= MINIMUM_CONFIDENCE_FLOOR][:15]
+
+    formatted_citations = []
+    for doc, score in top_matches:
+        formatted_citations.append({
+            "content": doc.content,
+            "source": doc.source,
+            "category": doc.category,
+            "confidence": round(score, 2),
+            "metadata": doc.metadata
+        })
+        
+    return {"insights": formatted_citations if formatted_citations else [{"message": "No direct match found."}]}
+
+@mcp.tool()
+def list_projects() -> Dict[str, Any]:
+    """Exposes an exhaustive structured index of all GitHub repositories and metadata."""
+    repos = fetch_live_github_repos()
+    catalog = []
+    
+    for repo in repos:
+        catalog.append({
+            "name": repo.get("name"),
+            "description": repo.get("description", "No description available."),
+            "primary_language": repo.get("language", "Not specified"),
+            "github_url": repo.get("html_url"),
+            "topics": repo.get("topics", []),
+            "metrics": {
+                "stars": repo.get("stargazers_count", 0),
+                "open_issues": repo.get("open_issues_count", 0),
+            },
+            "timeline": {
+                "last_updated": repo.get("updated_at")
+            }
+        })
+    return {"portfolio_repositories": catalog}
+
+@mcp.tool()
+def get_project_details(project_name: str) -> Dict[str, Any]:
+    """Unpacks technical architecture by retrieving and chunking specific READMEs."""
+    repos = fetch_live_github_repos()
+    target_name = resolve_project_name(project_name, repos)
+            
+    if not target_name:
+        return {"error": f"Repository '{project_name}' could not be located via fuzzy index lookup."}
+        
+    repo_meta = next(r for r in repos if r.get("name") == target_name)
+    raw_readme = fetch_live_readme(target_name)
+    
+    readme_chunks = _chunk_readme_text(raw_readme, target_name) if raw_readme else []
+    
+    formatted_sections = []
+    for chunk in readme_chunks[:4]:
+        formatted_sections.append({
+            "section": chunk.metadata.get("section"),
+            "content": chunk.content
+        })
+    
+    return {
+        "resolved_name": target_name,
+        "description": repo_meta.get("description", ""),
+        "github_url": repo_meta.get("html_url"),
+        "primary_language": repo_meta.get("language"),
+        "topics": repo_meta.get("topics", []),
+        "segmented_readme_documentation": formatted_sections
+    }
+
+@mcp.tool()
+def get_current_music() -> str:
+    """Check what music Ishaan is currently listening to (or recently played) on Spotify."""
+    info = get_spotify_playback()
+    if info.get("isPlaying"):
+        return f"Ishaan is currently listening to '{info.get('title')}' by {info.get('artist')} on Spotify. Link: {info.get('songUrl')}"
+    elif info.get("title"):
+        return f"Ishaan recently listened to '{info.get('title')}' by {info.get('artist')} on Spotify. Link: {info.get('songUrl')}"
+    return "No music playback currently active on Spotify."
+
+app = mcp.streamable_http_app()
+    
 if __name__ == "__main__":
     mcp.run(transport='streamable-http')
