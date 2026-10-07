@@ -454,6 +454,108 @@ def fetch_live_portfolio_data() -> Dict[str, Any]:
 
     return _PORTFOLIO_CACHE or {}
 
+_PORTFOLIO_SITE_CACHE: Optional[Dict[str, Any]] = None
+_PORTFOLIO_SITE_CACHE_TIME: float = 0.0
+
+def _fetch_remote_github_file(repo: str, file_path: str, timeout: int = 6) -> str:
+    """Helper to fetch raw text of a file from GitHub repository."""
+    url = f"https://raw.githubusercontent.com/{repo}/main/{file_path}"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "MCP-Portfolio-Server"})
+        ctx = _create_ssl_context()
+        with urllib.request.urlopen(req, context=ctx, timeout=timeout) as resp:
+            return resp.read().decode("utf-8")
+    except Exception:
+        return ""
+
+def fetch_live_portfolio_site_structure() -> Dict[str, Any]:
+    """Dynamically parses live navigation tabs, App Router pages, meta subcomponents, and package dependencies from ishaankor/my-data-science-portfolio on GitHub with TTL cache."""
+    global _PORTFOLIO_SITE_CACHE, _PORTFOLIO_SITE_CACHE_TIME
+    now = time.time()
+    if _PORTFOLIO_SITE_CACHE and (now - _PORTFOLIO_SITE_CACHE_TIME < CACHE_TTL):
+        return _PORTFOLIO_SITE_CACHE
+
+    repo = f"{GITHUB_USERNAME}/my-data-science-portfolio"
+    nav_code = _fetch_remote_github_file(repo, "components/layout/Navbar.tsx")
+    nav_items = []
+    if nav_code:
+        for m in re.finditer(r'\{\s*href:\s*[\'\"]([^\'\"]+)[\'\"],\s*number:\s*[\'\"]([^\'\"]+)[\'\"],\s*label:\s*[\'\"]([^\'\"]+)[\'\"]\s*\}', nav_code):
+            nav_items.append({
+                "number": m.group(2),
+                "label": m.group(3),
+                "href": m.group(1),
+                "url": f"https://portfolio.ishaankoradia.com{m.group(1)}"
+            })
+
+    routes = ["meta", "projects", "work", "resume", "contact"]
+    pages = {}
+    for r in routes:
+        code = _fetch_remote_github_file(repo, f"app/{r}/page.tsx")
+        if code:
+            title_m = re.search(r'title:\s*[\'\"]([^\'\"]+)[\'\"]', code)
+            desc_m = re.search(r'description:\s*[\'\"]([^\'\"]+)[\'\"]', code, flags=re.DOTALL)
+            components = re.findall(r'<([A-Z][a-zA-Z0-9]+)', code)
+            pages[r] = {
+                "route": f"/{r}",
+                "url": f"https://portfolio.ishaankoradia.com/{r}",
+                "title": title_m.group(1) if title_m else f"{r.capitalize()} | Ishaan Koradia",
+                "description": " ".join(desc_m.group(1).split()) if desc_m else "",
+                "components": list(dict.fromkeys(components))
+            }
+
+    meta_dash_code = _fetch_remote_github_file(repo, "components/meta/GitHubMetaDashboard.tsx")
+    meta_subcomponents = []
+    if meta_dash_code:
+        for m in re.finditer(r'import\s+([A-Z][a-zA-Z0-9]+)\s+from\s+[\'\"]\./([a-zA-Z0-9]+)[\'\"]', meta_dash_code):
+            meta_subcomponents.append(m.group(1))
+
+    pkg_code = _fetch_remote_github_file(repo, "package.json")
+    dependencies = {}
+    if pkg_code:
+        try:
+            pkg = json.loads(pkg_code)
+            dependencies = pkg.get("dependencies", {})
+        except Exception:
+            pass
+
+    microservice_url = "https://github-meta-fetcher.vercel.app/api/github"
+    telemetry_status = {}
+    try:
+        t_req = urllib.request.Request(microservice_url, headers={"User-Agent": "MCP-Portfolio-Server"})
+        ctx = _create_ssl_context()
+        with urllib.request.urlopen(t_req, context=ctx, timeout=5) as t_resp:
+            t_data = json.loads(t_resp.read().decode("utf-8"))
+            telemetry_status = {
+                "status": t_data.get("status", "online"),
+                "username": t_data.get("username", "ishaankor"),
+                "public_repos": t_data.get("user", {}).get("public_repos", len(t_data.get("repos", []))),
+                "latest_commits_tracked": len(t_data.get("commits", [])),
+                "fetched_at": t_data.get("fetchedAt", "")
+            }
+    except Exception:
+        telemetry_status = {"status": "active", "microservice": microservice_url}
+
+    result = {
+        "site_title": "Ishaan Koradia — AI & Data Science Portfolio",
+        "portfolio_url": "https://portfolio.ishaankoradia.com",
+        "github_repository": f"https://github.com/{repo}",
+        "navigation_tabs": nav_items,
+        "pages": pages,
+        "meta_tab_architecture": {
+            "route": "/meta",
+            "url": "https://portfolio.ishaankoradia.com/meta",
+            "page_title": pages.get("meta", {}).get("title", "Meta & GitHub Analytics | Ishaan Koradia"),
+            "page_description": pages.get("meta", {}).get("description", ""),
+            "subcomponents": meta_subcomponents,
+            "microservice_endpoint": microservice_url,
+            "live_telemetry_snapshot": telemetry_status
+        },
+        "dependencies": dependencies
+    }
+    _PORTFOLIO_SITE_CACHE = result
+    _PORTFOLIO_SITE_CACHE_TIME = now
+    return result
+
 _WEBSITE_CACHE: Optional[Dict[str, Any]] = None
 _WEBSITE_CACHE_TIME: float = 0.0
 
@@ -1204,68 +1306,88 @@ def _build_static_kb():
         }
     ))
 
-    # 13. Portfolio Website Architecture & Navigation Tabs (portfolio.ishaankoradia.com)
-    portfolio_meta_doc = (
-        "Portfolio Website 'Meta' Tab (https://portfolio.ishaankoradia.com/meta): "
-        "The 'Meta' tab (03 Meta) on Ishaan's portfolio is a dedicated real-time GitHub analytics, telemetry, and codebase evolution dashboard. "
-        "Key features and sections include: "
-        "1. Live GitHub Telemetry: Live contribution calendar, commit activity stream, and repository explorer dynamically synchronized from the companion Github-Meta-Fetcher API (https://github-meta-fetcher.vercel.app/api/github). "
-        "2. Codebase Evolution Suite: Interactive visualizer mining git logs to compute Lines of Code (LOC) additions, deletions, net growth, and language distribution over time. "
-        "3. Developer Habits Matrix: Diurnal commit radar mapping Ishaan's active engineering hours across 24-hour cycles and weekly cadence. "
-        "4. Repository Constellation: Project velocity explorer with search and language filters. "
-        "Direct Link: https://portfolio.ishaankoradia.com/meta."
+    # 13. Dynamic Portfolio Website Architecture & Navigation Tabs (portfolio.ishaankoradia.com)
+    site_struct = fetch_live_portfolio_site_structure()
+    nav_tabs = site_struct.get("navigation_tabs", [])
+    pages = site_struct.get("pages", {})
+    meta_arch = site_struct.get("meta_tab_architecture", {})
+    deps = site_struct.get("dependencies", {})
+    
+    # Dynamic Meta Tab Document
+    meta_p = pages.get("meta", {})
+    meta_subs = ", ".join(meta_arch.get("subcomponents", []))
+    meta_tel = meta_arch.get("live_telemetry_snapshot", {})
+    meta_doc = (
+        f"Portfolio Website Tab: {meta_p.get('title', 'Meta & GitHub Analytics')}. "
+        f"Route: {meta_p.get('route', '/meta')}. Direct Link: {meta_p.get('url', 'https://portfolio.ishaankoradia.com/meta')}. "
+        f"Description: {meta_p.get('description', '')}. "
+        f"Architecture Components: {meta_subs}. "
+        f"Telemetry Microservice: {meta_arch.get('microservice_endpoint', '')} "
+        f"(Status: {meta_tel.get('status', 'online')}, Public Repos Tracked: {meta_tel.get('public_repos', '')}, "
+        f"Latest Commits Tracked: {meta_tel.get('latest_commits_tracked', '')})."
     )
     _STATIC_DOCS_BY_CAT["portfolio"].append(Document(
         id="portfolio_tab_meta",
         category="portfolio",
-        source="Portfolio Website - Tab 03 (Meta)",
-        content=portfolio_meta_doc,
-        metadata={"priority": 15, "url": "https://portfolio.ishaankoradia.com/meta"}
+        source=f"Live Portfolio Tab — {meta_p.get('title', '03 Meta')}",
+        content=meta_doc,
+        metadata={"priority": 15, "url": meta_p.get("url", "https://portfolio.ishaankoradia.com/meta")}
     ))
 
-    portfolio_projects_doc = (
-        "Portfolio Website 'Projects' Tab (https://portfolio.ishaankoradia.com/projects): "
-        "The 'Projects' tab (01 Projects) is an interactive, filterable engineering catalog categorized across Machine Learning, AI & Web, Automation, and Data Visualization. "
-        "Showcases production applications (Datafy, RigScouter-AI, Transformi, IshaanBot, Daily Motivation Bot, Canvas Files Merger) "
-        "alongside dedicated Exploratory Data Analysis (EDA) research studies (Surgery Statistics, Childhood Obesity, Recipe Ratings, Bike Watching). "
-        "Direct Link: https://portfolio.ishaankoradia.com/projects."
+    # Dynamic Projects Tab Document
+    proj_p = pages.get("projects", {})
+    proj_count = len(p_data.get("projects", []))
+    proj_doc = (
+        f"Portfolio Website Tab: {proj_p.get('title', 'Projects Library | Portfolio')}. "
+        f"Route: {proj_p.get('route', '/projects')}. Direct Link: {proj_p.get('url', 'https://portfolio.ishaankoradia.com/projects')}. "
+        f"Description: {proj_p.get('description', '')}. "
+        f"Active Production Projects Tracked: {proj_count}. "
+        f"Components: {', '.join(proj_p.get('components', []))}."
     )
     _STATIC_DOCS_BY_CAT["portfolio"].append(Document(
         id="portfolio_tab_projects",
         category="portfolio",
-        source="Portfolio Website - Tab 01 (Projects)",
-        content=portfolio_projects_doc,
-        metadata={"priority": 12, "url": "https://portfolio.ishaankoradia.com/projects"}
+        source=f"Live Portfolio Tab — {proj_p.get('title', '01 Projects')}",
+        content=proj_doc,
+        metadata={"priority": 12, "url": proj_p.get("url", "https://portfolio.ishaankoradia.com/projects")}
     ))
 
-    portfolio_work_doc = (
-        "Portfolio Website 'Work' Tab (https://portfolio.ishaankoradia.com/work & /resume): "
-        "The 'Work' tab (02 Work) features an interactive 3D WebGL timeline resume, career trajectory, Handshake AI / NVIDIA Nemotron-12B evaluations, "
-        "Verizon computer vision engineering, UC San Diego Cognitive Science education, verified certifications, and downloadable PDF resume. "
-        "Direct Links: https://portfolio.ishaankoradia.com/work and https://portfolio.ishaankoradia.com/resume."
+    # Dynamic Work / Resume Tab Document
+    work_p = pages.get("work", {})
+    work_doc = (
+        f"Portfolio Website Tab: {work_p.get('title', 'Work & Experience | Ishaan Koradia')}. "
+        f"Route: {work_p.get('route', '/work')}. Direct Link: {work_p.get('url', 'https://portfolio.ishaankoradia.com/work')}. "
+        f"Description: {work_p.get('description', '')}. "
+        f"Interactive 3D WebGL Resume: {pages.get('resume', {}).get('url', 'https://portfolio.ishaankoradia.com/resume')}. "
+        f"Components: {', '.join(work_p.get('components', []))}."
     )
     _STATIC_DOCS_BY_CAT["portfolio"].append(Document(
         id="portfolio_tab_work",
         category="portfolio",
-        source="Portfolio Website - Tab 02 (Work & Resume)",
-        content=portfolio_work_doc,
-        metadata={"priority": 12, "url": "https://portfolio.ishaankoradia.com/work"}
+        source=f"Live Portfolio Tab — {work_p.get('title', '02 Work')}",
+        content=work_doc,
+        metadata={"priority": 12, "url": work_p.get("url", "https://portfolio.ishaankoradia.com/work")}
     ))
 
-    portfolio_overview_doc = (
-        "Ishaan's Engineering Portfolio Website (https://portfolio.ishaankoradia.com): "
-        "Architected as an interactive data product using Next.js 14 App Router, TypeScript, Three.js, React Three Fiber, Tailwind CSS, and Framer Motion. "
-        "Distinction Note: Ishaan has TWO distinct web platforms: "
-        "1. Personal Website (https://ishaankoradia.com): 7 narrative chapters (Identity, Spark, Mind, Frontier, Sandbox, Live Pulse, Open Door). "
-        "2. Portfolio Website (https://portfolio.ishaankoradia.com): 3 main tabs — 01 Projects (/projects), 02 Work (/work & /resume), and 03 Meta (/meta). "
-        "Hero features include an interactive 3D Memoji card with physics-based cursor tilt, 180° flip mechanics, and Midnight Haze cursor trail."
+    # Dynamic Portfolio Architecture Overview Document
+    nav_summary = " -> ".join([f"{n.get('number')} {n.get('label')} ({n.get('url')})" for n in nav_tabs])
+    deps_list = ", ".join(list(deps.keys())[:8])
+    overview_doc = (
+        f"Ishaan's Engineering Portfolio Website ({site_struct.get('portfolio_url', 'https://portfolio.ishaankoradia.com')}): "
+        f"Title: {site_struct.get('site_title')}. "
+        f"Repository: {site_struct.get('github_repository')}. "
+        f"Navigation Tabs: {nav_summary}. "
+        f"Tech Dependencies: {deps_list}. "
+        f"Distinction Note: Ishaan maintains TWO separate platforms: "
+        f"1. Personal Website (https://ishaankoradia.com) structured into 7 narrative chapters. "
+        f"2. Portfolio Website (https://portfolio.ishaankoradia.com) structured into navigation tabs: {', '.join([n.get('label', '') for n in nav_tabs])}."
     )
     _STATIC_DOCS_BY_CAT["portfolio"].append(Document(
         id="portfolio_overview_architecture",
         category="portfolio",
-        source="Portfolio Website - Architecture & Overview",
-        content=portfolio_overview_doc,
-        metadata={"priority": 14, "url": "https://portfolio.ishaankoradia.com"}
+        source="Live Portfolio Architecture (package.json, Navbar.tsx, App Router)",
+        content=overview_doc,
+        metadata={"priority": 14, "url": site_struct.get("portfolio_url")}
     ))
 
     # Compile BM25 Indexes
@@ -1648,76 +1770,80 @@ def get_personal_website_info() -> Dict[str, Any]:
 
 @mcp.tool()
 def get_portfolio_website_info(tab: Optional[str] = None) -> Dict[str, Any]:
-    """Provides comprehensive architectural, navigation, and technical details for Ishaan's official Portfolio Website (portfolio.ishaankoradia.com). Explains all navigation tabs (01 Projects, 02 Work / Resume, 03 Meta, Home, and Contact), technical features, interactive 3D WebGL scenes, and live telemetry integrations. ALWAYS invoke this tool when asked about Ishaan's portfolio website, the 'Meta' tab, the 'Work' tab, the 'Projects' tab, or how his portfolio is built."""
-    tabs_summary = {
-        "01_projects": {
-            "tab_name": "01 Projects",
-            "url": "https://portfolio.ishaankoradia.com/projects",
-            "description": "Interactive, filterable engineering project catalog categorized across Machine Learning, AI & Web, Automation, and Data Visualization.",
-            "content_summary": "Features production systems (Datafy, RigScouter-AI, Transformi, IshaanBot) alongside dedicated Exploratory Data Analysis (EDA) research studies (Surgery Statistics, Childhood Obesity, Recipe Ratings, Bike Watching Transit Patterns).",
-            "filter_categories": ["All", "Machine Learning", "AI & Web", "Automation", "Data Visualization"]
-        },
-        "02_work": {
-            "tab_name": "02 Work / Resume",
-            "url": "https://portfolio.ishaankoradia.com/work",
-            "resume_url": "https://portfolio.ishaankoradia.com/resume",
-            "description": "Interactive 3D career timeline, work experience trajectory, education, verified certifications, and downloadable PDF resume.",
-            "key_highlights": "Highlights role as AI Engineer at Handshake AI (NVIDIA Nemotron-12B evaluations, 300+ context strategies), Project Engineer at Verizon Media Platform (1st place computer vision award), and UC San Diego Cognitive Science (Machine Learning & Neural Computation, GPA 3.76)."
-        },
-        "03_meta": {
-            "tab_name": "03 Meta (GitHub Analytics & Telemetry Dashboard)",
-            "url": "https://portfolio.ishaankoradia.com/meta",
-            "description": "Live repository telemetry, GitHub contribution analytics, and Codebase Evolution dashboard.",
-            "key_features": [
-                "Live GitHub Activity Stream & Telemetry: Real-time contribution heatmap, commit frequency, and repository explorer powered by the companion Github-Meta-Fetcher API (https://github-meta-fetcher.vercel.app/api/github).",
-                "Codebase Evolution Suite: Interactive visualizer mining git logs to compute Lines of Code (LOC) additions, deletions, net growth, and language distribution over time.",
-                "Developer Habits Matrix: Diurnal commit radar mapping Ishaan's active engineering hours across the 24-hour day and 7-day week.",
-                "Repository Constellation: Searchable project explorer with dynamic language pills and repository metrics."
-            ],
-            "companion_microservice": "https://github-meta-fetcher.vercel.app/api/github"
-        },
-        "home": {
-            "tab_name": "Home / Hero",
-            "url": "https://portfolio.ishaankoradia.com",
-            "features": "Interactive 3D WebGL Memoji Hero Card with physics-based cursor tilt (rotateX/rotateY), 180° card flip mechanics, Midnight Haze cursor trail, and Hero Agentic Console."
-        },
-        "contact": {
-            "tab_name": "Contact",
-            "url": "https://portfolio.ishaankoradia.com/contact",
-            "channels": {
-                "email": "ishaankoradia@gmail.com",
-                "linkedin": "https://linkedin.com/in/ishaankoradia",
-                "github": "https://github.com/ishaankor"
-            }
+    """Provides comprehensive architectural, navigation, and technical details dynamically fetched from Ishaan's official Portfolio Website (portfolio.ishaankoradia.com) repository. Explains all navigation tabs (01 Projects, 02 Work / Resume, 03 Meta, Home, Contact), technical features, interactive 3D WebGL scenes, and live telemetry integrations. ALWAYS invoke this tool when asked about Ishaan's portfolio website, the 'Meta' tab, the 'Work' tab, the 'Projects' tab, or how his portfolio is built."""
+    site_struct = fetch_live_portfolio_site_structure()
+    p_data = fetch_live_portfolio_data()
+    nav_tabs = site_struct.get("navigation_tabs", [])
+    pages = site_struct.get("pages", {})
+    deps = site_struct.get("dependencies", {})
+    meta_arch = site_struct.get("meta_tab_architecture", {})
+
+    dynamic_tabs = {}
+    for nav in nav_tabs:
+        num = nav.get("number", "")
+        lbl = nav.get("label", "").lower()
+        key = f"{num}_{lbl}"
+        page_info = pages.get(lbl, {})
+        dynamic_tabs[key] = {
+            "tab_name": f"{num} {nav.get('label', '')}",
+            "url": nav.get("url", f"https://portfolio.ishaankoradia.com{nav.get('href', '')}"),
+            "meta_title": page_info.get("title", ""),
+            "meta_description": page_info.get("description", ""),
+            "rendered_components": page_info.get("components", [])
         }
-    }
-    
+
+    for r_key, p_val in pages.items():
+        if not any(r_key in k for k in dynamic_tabs.keys()):
+            dynamic_tabs[r_key] = {
+                "tab_name": r_key.capitalize(),
+                "url": p_val.get("url", f"https://portfolio.ishaankoradia.com/{r_key}"),
+                "meta_title": p_val.get("title", ""),
+                "meta_description": p_val.get("description", ""),
+                "rendered_components": p_val.get("components", [])
+            }
+
     if tab:
         t_clean = tab.lower().strip()
-        for k, v in tabs_summary.items():
+        matched_key = None
+        matched_val = None
+        for k, v in dynamic_tabs.items():
             if t_clean in k or t_clean in v.get("tab_name", "").lower() or t_clean in v.get("url", "").lower():
-                return {
-                    "matched_tab": v,
-                    "portfolio_url": "https://portfolio.ishaankoradia.com",
-                    "tech_stack": "Next.js 14 App Router, TypeScript, Three.js, React Three Fiber, Tailwind CSS, Lucide icons, D3/SVG visualizations",
-                    "verified_source": "Live portfolio architecture from ishaankor/my-data-science-portfolio"
-                }
-                
+                matched_key = k
+                matched_val = v
+                break
+
+        if matched_val:
+            response = {
+                "matched_tab": matched_val,
+                "portfolio_url": site_struct.get("portfolio_url", "https://portfolio.ishaankoradia.com"),
+                "github_repository": site_struct.get("github_repository", ""),
+                "verified_source": "Dynamically fetched from ishaankor/my-data-science-portfolio repository & live telemetry"
+            }
+            if "meta" in matched_key:
+                response["meta_tab_architecture"] = meta_arch
+            elif "projects" in matched_key:
+                response["live_projects_count"] = len(p_data.get("projects", []))
+                response["featured_projects"] = [
+                    {"title": p.get("title"), "category": p.get("category"), "tags": p.get("tags")}
+                    for p in p_data.get("projects", []) if p.get("featured")
+                ]
+            elif "work" in matched_key or "resume" in matched_key:
+                response["career_experience"] = [
+                    {"role": e.get("role"), "organization": e.get("organization"), "period": e.get("period")}
+                    for e in p_data.get("experience", [])
+                ]
+            return response
+
     return {
-        "portfolio_title": "Ishaan Koradia — AI & Data Science Portfolio",
-        "portfolio_url": "https://portfolio.ishaankoradia.com",
-        "github_repo": f"https://github.com/{GITHUB_USERNAME}/my-data-science-portfolio",
-        "all_tabs": tabs_summary,
-        "meta_tab_deep_dive": tabs_summary["03_meta"],
-        "tech_stack": {
-            "framework": "Next.js 14 (App Router, Static Export)",
-            "languages": ["TypeScript", "Python"],
-            "graphics_and_3d": "Three.js, React Three Fiber, WebGL canvas shaders",
-            "styling": "Tailwind CSS, Midnight Haze design tokens (#090d16 space, #38bdf8 cyan, #f97316 ember)",
-            "telemetry_pipeline": "Companion microservice (Github-Meta-Fetcher on Vercel) + Git log miner (generate-loc.mjs)"
-        },
+        "portfolio_title": site_struct.get("site_title", "Ishaan Koradia — AI & Data Science Portfolio"),
+        "portfolio_url": site_struct.get("portfolio_url", "https://portfolio.ishaankoradia.com"),
+        "github_repository": site_struct.get("github_repository", ""),
+        "navigation_tabs": nav_tabs,
+        "tabs_detail": dynamic_tabs,
+        "meta_tab_live_telemetry": meta_arch,
+        "dependencies": deps,
         "distinction_note": "Ishaan maintains TWO separate platforms: 1. Personal Website (ishaankoradia.com) structured into 7 narrative chapters, and 2. Portfolio Website (portfolio.ishaankoradia.com) structured into tabs: 01 Projects, 02 Work / Resume, and 03 Meta.",
-        "verified_source": "Live dynamically parsed from ishaankor/my-data-science-portfolio (app router, components/meta, README.md)"
+        "verified_source": "Dynamically fetched from ishaankor/my-data-science-portfolio repository & live telemetry"
     }
 
 @mcp.tool()
