@@ -1743,11 +1743,11 @@ def _fetch_live_workbench_data() -> Dict[str, Any]:
                 "recent_commits": recent_commits_summary,
                 "meta_telemetry": {
                     "meta_page_url": "https://portfolio.ishaankoradia.com/meta",
-                    "total_historical_commits": meta_telemetry.get("totalHistoricalCommits", 146),
-                    "total_lines_tracked": meta_telemetry.get("totalLinesTracked", 46796),
-                    "total_additions": meta_telemetry.get("totalAdditions", 35245),
-                    "total_deletions": meta_telemetry.get("totalDeletions", 11551),
-                    "total_files_tracked": meta_telemetry.get("totalFilesTracked", 87),
+                    "total_historical_commits": meta_telemetry.get("totalHistoricalCommits", 0),
+                    "total_lines_tracked": meta_telemetry.get("totalLinesTracked", 0),
+                    "total_additions": meta_telemetry.get("totalAdditions", 0),
+                    "total_deletions": meta_telemetry.get("totalDeletions", 0),
+                    "total_files_tracked": meta_telemetry.get("totalFilesTracked", 0),
                     "top_languages": meta_telemetry.get("topLanguages", [])
                 },
                 "meta_page_url": "https://portfolio.ishaankoradia.com/meta",
