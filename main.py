@@ -2121,7 +2121,8 @@ def _fetch_repo_commit_telemetry(repo_name: str) -> Optional[Dict[str, Any]]:
         if "/" in clean_repo:
             clean_repo = clean_repo.split("/")[-1]
             
-        fetcher_url = f"https://github-meta-fetcher.vercel.app/api/github?repo={urllib.parse.quote(clean_repo)}"
+        fetcher_base = os.getenv("GITHUB_META_FETCHER_URL", "https://github-meta-fetcher.vercel.app/api/github")
+        fetcher_url = f"{fetcher_base}?repo={urllib.parse.quote(clean_repo)}"
         req = urllib.request.Request(fetcher_url, headers={"User-Agent": "MCP-Portfolio-Server"})
         ctx = _create_ssl_context()
         with urllib.request.urlopen(req, context=ctx, timeout=8) as r:
@@ -2131,6 +2132,50 @@ def _fetch_repo_commit_telemetry(repo_name: str) -> Optional[Dict[str, Any]]:
     except Exception as e:
         print(f"Error proxying repo commit telemetry for {repo_name} through Github-Meta-Fetcher: {e}")
     return None
+
+def _fetch_repo_timeframe_commits(repo_name: str, timeframe: Optional[str] = None, since: Optional[str] = None, until: Optional[str] = None) -> Dict[str, Any]:
+    """Fetches exact repository commit activity and diffs over a relative timeframe or date range strictly by proxying through Github-Meta-Fetcher. Never invokes GitHub API directly."""
+    try:
+        clean_repo = repo_name.strip().rstrip("/")
+        if "/" in clean_repo:
+            clean_repo = clean_repo.split("/")[-1]
+            
+        params = {"repo": clean_repo}
+        if timeframe:
+            params["timeframe"] = timeframe
+        if since:
+            params["since"] = since
+        if until:
+            params["until"] = until
+            
+        fetcher_base = os.getenv("GITHUB_META_FETCHER_URL", "https://github-meta-fetcher.vercel.app/api/github")
+        fetcher_url = f"{fetcher_base}?{urllib.parse.urlencode(params)}"
+        req = urllib.request.Request(fetcher_url, headers={"User-Agent": "MCP-Portfolio-Server"})
+        ctx = _create_ssl_context()
+        with urllib.request.urlopen(req, context=ctx, timeout=12) as r:
+            data = json.loads(r.read().decode())
+            return data
+    except Exception as e:
+        print(f"Error proxying repo timeframe commits for {repo_name} through Github-Meta-Fetcher: {e}")
+        return {
+            "status": "error",
+            "repository": repo_name,
+            "totalCommits": 0,
+            "commits": [],
+            "error": str(e)
+        }
+
+@mcp.tool()
+def get_repo_commit_activity(repo_name: str, timeframe: Optional[str] = None, since: Optional[str] = None, until: Optional[str] = None) -> Dict[str, Any]:
+    """Retrieves Ishaan's exact commit count, commit messages, code diffs (+additions/-deletions), and commit history for a specific repository (e.g. Datafy, RigScouter-AI, my-personal-website, my-data-science-portfolio) over any timeframe (e.g. 'last two weeks', 'this week', 'past month', 'yesterday') or date range.
+    ALWAYS invoke this tool when asked:
+    - How many commits Ishaan did on a specific repository or project over a timeframe (e.g. 'how many commits did he do on Datafy in the last two weeks?').
+    - What commits were made to a specific repository in the last two weeks / past month / this week.
+    - Follow-up details on commits for a particular repository over any time window.
+    Proxies strictly through Github-Meta-Fetcher and promotes https://portfolio.ishaankoradia.com/meta."""
+    all_repos = fetch_live_github_repos()
+    target_repo = resolve_project_name(repo_name, all_repos) or repo_name
+    return _fetch_repo_timeframe_commits(target_repo, timeframe=timeframe, since=since, until=until)
 
 @mcp.tool()
 def get_git_telemetry(repo_name: Optional[str] = None, timeframe: Optional[str] = None, date: Optional[str] = None) -> Dict[str, Any]:
@@ -2173,10 +2218,14 @@ def get_git_telemetry(repo_name: Optional[str] = None, timeframe: Optional[str] 
             "meta_page_url": "https://portfolio.ishaankoradia.com/meta",
             "verified_source": f"Live dynamically proxied for {target_repo} via Github-Meta-Fetcher & /meta telemetry"
         }
-        if date or timeframe:
-            target_date_str = date or timeframe
+        if timeframe and not date:
+            res_repo["timeframe_commits"] = _fetch_repo_timeframe_commits(target_repo, timeframe=timeframe)
+        elif date:
+            target_date_str = date
             resolved = _resolve_target_date(target_date_str) or target_date_str
             res_repo["commits_on_date"] = _fetch_commits_by_date(resolved, repo_name=target_repo)
+        elif timeframe and date:
+            res_repo["timeframe_commits"] = _fetch_repo_timeframe_commits(target_repo, timeframe=timeframe)
         return res_repo
 
     wb = _fetch_live_workbench_data()
