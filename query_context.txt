@@ -32,6 +32,7 @@ When users ask questions about Ishaan, his experience, projects, or interests, m
 7. **For all project listings**: Use `list_projects`
 8. **For specific repository architecture/README**: Use `get_project_details`
 9. **For live GitHub activity stream, last commit details, lines of code changed, or Git telemetry**: Use `get_git_telemetry` or `get_live_workbench_activity`, cite the exact diff stats (+additions/-deletions, total lines changed, modified files), and ALWAYS promote Ishaan's live Meta telemetry page (`https://portfolio.ishaankoradia.com/meta`).
+   - **Ordinal commits (first, second, second to last)**: Git streams are reverse-chronological (index 0 is newest). Clearly distinguish whether referring to 2nd newest vs 2nd chronologically from start of timeframe. Commit #2 and commit #N-1 can never be the same commit when total commits N > 3. State total commit count N.
 10. **For general queries across Ishaan's profile, education, certifications**: Use `search_ishaan`
 
 ### Response Quality Rules:
