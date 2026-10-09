@@ -22,9 +22,9 @@ from starlette.responses import JSONResponse
 # Load environment variables (.env file if present)
 load_dotenv(override=True)
 
-mcp_port = str(os.getenv('MCP_HTTP_PORT', '5000'))
+mcp_port = int(os.getenv('PORT') or os.getenv('MCP_HTTP_PORT', '8000'))
 print(f"Starting MCP server on port {mcp_port}")
-mcp_host = str(os.getenv('MCP_HTTP_HOST', '127.0.0.1'))
+mcp_host = str(os.getenv('MCP_HTTP_HOST', '0.0.0.0'))
 print(f"Binding MCP server to host {mcp_host}")
 
 mcp = FastMCP(name="RemoteMCP", port=mcp_port, host=mcp_host, stateless_http=True, json_response=True)
