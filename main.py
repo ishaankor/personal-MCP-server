@@ -311,24 +311,43 @@ def load_text_file(filename: str) -> str:
     return ""
 
 def resolve_project_name(query_name: str, repos: List[Dict]) -> Optional[str]:
-    """Resolves project queries using an Alias -> Exact -> Fuzzy matching hierarchy."""
+    """Resolves project queries using an Alias -> Exact -> Normalized -> Fuzzy matching hierarchy."""
     query_lower = query_name.lower().strip()
+    clean_query = re.sub(r'[^a-z0-9]', '', query_lower)
     keywords_map = load_json_file("project_keywords.json").get("project_keywords", {})
-    
-    for alias_key, repo_list in keywords_map.items():
-        if query_lower == alias_key.lower() and repo_list:
-            return repo_list[0]
-
-    for alias_key in sorted(keywords_map.keys(), key=len, reverse=True):
-        if alias_key.lower() in query_lower and keywords_map[alias_key]:
-            return keywords_map[alias_key][0]
-            
     repo_names = [r.get("name", "") for r in repos]
     
+    def _match_in_repos(candidate_name: str) -> str:
+        for r_name in repo_names:
+            if r_name.lower() == candidate_name.lower():
+                return r_name
+            if re.sub(r'[^a-z0-9]', '', r_name.lower()) == re.sub(r'[^a-z0-9]', '', candidate_name.lower()):
+                return r_name
+        return candidate_name
+
+    # 1. Exact alias match
+    for alias_key, repo_list in keywords_map.items():
+        if query_lower == alias_key.lower() and repo_list:
+            return _match_in_repos(repo_list[0])
+
+    # 2. Substring alias match
+    for alias_key in sorted(keywords_map.keys(), key=len, reverse=True):
+        if alias_key.lower() in query_lower and keywords_map[alias_key]:
+            return _match_in_repos(keywords_map[alias_key][0])
+            
+    # 3. Direct case-insensitive match
     for name in repo_names:
         if name.lower() == query_lower:
             return name
+
+    # 4. Normalized alphanumeric match (ignores hyphens, trailing dashes, spaces)
+    if clean_query:
+        for name in repo_names:
+            clean_name = re.sub(r'[^a-z0-9]', '', name.lower())
+            if clean_name and (clean_name == clean_query or clean_query in clean_name or clean_name in clean_query):
+                return name
             
+    # 5. Fuzzy match
     matches = difflib.get_close_matches(query_name, repo_names, n=1, cutoff=0.4)
     if matches:
         return matches[0]
@@ -1201,8 +1220,9 @@ def _build_static_kb():
         bubble = sandbox_bubbles.get(proj_title.lower(), "")
         bubble_str = f"Creator Note: {bubble}. " if bubble else ""
         
+        year_str = f"Created Year: {fp.get('year')}. " if fp.get('year') else ""
         content = (
-            f"Software Application / Engineering Project: {proj_title}. Category: {fp.get('category', 'Engineering')}. "
+            f"Software Application / Engineering Project: {proj_title}. Category: {fp.get('category', 'Engineering')}. {year_str}"
             f"Type: Software Engineering Application & Developer System (NOT an exploratory data analysis study). "
             f"Description: {fp.get('description', '')}. {detailed_str}{bubble_str}"
             f"Tech Stack: {tags_str}. {metrics_str}{live_str}{gh_str}"
@@ -1424,12 +1444,13 @@ def get_indexed_kb() -> Dict[str, PreindexedBM25]:
     if "projects" not in _BM25_INDEXES or (current_time - _DYNAMIC_KB_TIME > CACHE_TTL):
         dynamic_projects = []
         for repo in fetch_live_github_repos():
+            created_text = f" Created At: {repo.get('created_at')}." if repo.get("created_at") else ""
             dynamic_projects.append(Document(
                 id=repo.get("name", ""),
                 category="projects",
                 source=f"GitHub API - {repo.get('name')}",
-                content=f"Repository: {repo.get('name')}. Language: {repo.get('language')}. Description: {repo.get('description')}.",
-                metadata={"url": repo.get("html_url"), "stars": repo.get("stargazers_count")}
+                content=f"Repository: {repo.get('name')}. Language: {repo.get('language')}. Description: {repo.get('description')}.{created_text}",
+                metadata={"url": repo.get("html_url"), "stars": repo.get("stargazers_count"), "created_at": repo.get("created_at")}
             ))
             
         combined_projects = _STATIC_DOCS_BY_CAT["projects"] + dynamic_projects
@@ -1465,7 +1486,7 @@ def get_indexed_kb() -> Dict[str, PreindexedBM25]:
 # CORE EXPOSED MCP SYSTEM TOOLS
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
+# Internal helper (no longer exposed as MCP tool to eliminate broad tool routing ambiguity)
 def search_ishaan(query: str) -> Dict[str, Any]:
     """Unified retrieval pipeline across all categories: experience, projects, shortcuts, research, education, etc."""
     indexes = get_indexed_kb()
@@ -2597,6 +2618,7 @@ def list_projects() -> Dict[str, Any]:
                 "open_issues": repo.get("open_issues_count", 0),
             },
             "timeline": {
+                "created_at": repo.get("created_at"),
                 "last_updated": repo.get("updated_at")
             }
         })
@@ -2610,7 +2632,7 @@ def list_projects() -> Dict[str, Any]:
 
 @mcp.tool()
 def get_project_details(project_name: str) -> Dict[str, Any]:
-    """Unpacks technical architecture by retrieving and chunking specific READMEs."""
+    """Retrieves complete details, creation date, timeline, metadata, technical architecture, and documentation for a specific project or repository built by Ishaan (e.g. Daily Motivation, Datafy, RigScouter-AI, Transformi, NotesTaker, etc.). Always invoke this when asked when a project was created, what it is, how it works, or for its architecture."""
     repos = fetch_live_github_repos()
     target_name = resolve_project_name(project_name, repos)
             
@@ -2618,9 +2640,23 @@ def get_project_details(project_name: str) -> Dict[str, Any]:
         return {"error": f"Repository '{project_name}' could not be located via fuzzy index lookup."}
         
     matching_repos = [r for r in repos if r.get("name") == target_name]
+    if not matching_repos:
+        matching_repos = [r for r in repos if r.get("name", "").lower() == target_name.lower()]
     repo_meta = matching_repos[0] if matching_repos else {}
-    raw_readme = fetch_live_readme(target_name)
     
+    # Cross-reference portfolio.ts projects for curated details, tags, and year
+    p_data = fetch_live_portfolio_data()
+    portfolio_projects = p_data.get("projects", [])
+    matching_pf = None
+    target_clean = re.sub(r'[^a-z0-9]', '', target_name.lower())
+    for pf in portfolio_projects:
+        pf_clean_id = re.sub(r'[^a-z0-9]', '', pf.get("id", "").lower())
+        pf_clean_title = re.sub(r'[^a-z0-9]', '', pf.get("title", "").lower())
+        if target_clean in pf_clean_id or pf_clean_id in target_clean or target_clean in pf_clean_title:
+            matching_pf = pf
+            break
+
+    raw_readme = fetch_live_readme(target_name)
     readme_chunks = _chunk_readme_text(raw_readme, target_name) if raw_readme else []
     
     formatted_sections = []
@@ -2630,13 +2666,38 @@ def get_project_details(project_name: str) -> Dict[str, Any]:
             "content": chunk.content
         })
     
+    created_at = repo_meta.get("created_at")
+    created_date_str = None
+    created_year = None
+    if created_at:
+        try:
+            dt = datetime.datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+            created_date_str = dt.strftime("%B %d, %Y")
+            created_year = str(dt.year)
+        except Exception:
+            created_year = created_at[:4]
+            created_date_str = created_at
+    elif matching_pf and matching_pf.get("year"):
+        created_year = str(matching_pf.get("year"))
+        created_date_str = str(matching_pf.get("year"))
+
     return {
         "resolved_name": target_name,
-        "description": repo_meta.get("description", ""),
+        "title": matching_pf.get("title") if matching_pf else target_name,
+        "description": matching_pf.get("description") if matching_pf else repo_meta.get("description", ""),
+        "detailed_description": matching_pf.get("detailedDescription") if matching_pf else repo_meta.get("description", ""),
         "github_url": repo_meta.get("html_url", f"https://github.com/{GITHUB_USERNAME}/{target_name}"),
-        "primary_language": repo_meta.get("language"),
-        "topics": repo_meta.get("topics", []),
-        "segmented_readme_documentation": formatted_sections
+        "primary_language": repo_meta.get("language") or (matching_pf.get("tags", [None])[0] if matching_pf else None),
+        "tags_and_topics": list(set((repo_meta.get("topics") or []) + (matching_pf.get("tags") or []))) if matching_pf else repo_meta.get("topics", []),
+        "timeline": {
+            "created_at": created_at,
+            "created_date": created_date_str,
+            "year": created_year,
+            "last_updated": repo_meta.get("updated_at"),
+            "last_pushed": repo_meta.get("pushed_at")
+        },
+        "segmented_readme_documentation": formatted_sections,
+        "verified_source": "Live dynamically fetched from GitHub API and portfolio.ts"
     }
 
 @mcp.tool()

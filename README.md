@@ -18,18 +18,17 @@ This MCP server allows my personal AI chatbot to access structured information a
 
 ## Exposed MCP Tools
 
-1. `search_ishaan(query)` - Unified semantic BM25 retrieval across all domains.
-2. `get_current_music()` - Human-readable live Spotify status.
-3. `get_spotify_telemetry()` - Structured real-time Spotify telemetry with album art and playback state.
-4. `get_current_job_and_nvidia_experience()` - Real-time Handshake AI / NVIDIA Nemotron-12B role details.
-5. `get_apple_shortcuts()` - Live Apple Shortcuts with iCloud installation links and origins narrative.
-6. `get_eda_research(study_name)` - Dynamic multi-repo EDA research discovery and live README analysis.
-7. `get_personal_website_info()` - Live architectural overview and content for all 7 chapters.
-8. `get_website_chapter(chapter_identifier)` - Deep-dive into specific chapters (01-07, identity, spark, mind, frontier, sandbox, pulse, door).
-9. `list_projects()` - Structured portfolio systems, featured items, and live GitHub catalog.
-10. `get_project_details(project_name)` - Deep-dive into project architecture via segmented READMEs.
-11. `get_live_workbench_activity()` - Real-time GitHub commit feed and active workbench telemetry.
-12. `get_portfolio_resume_and_work()` - Live candidate profile, verified experience, education, certs, and portfolio Work tab links.
+1. `get_project_details(project_name)` - Complete project metadata, creation date/timeline, architecture, and segmented READMEs.
+2. `list_projects()` - Structured portfolio systems, featured items, and live GitHub catalog with creation timelines.
+3. `get_current_job_and_nvidia_experience()` - Real-time Handshake AI / NVIDIA Nemotron-12B role details.
+4. `get_apple_shortcuts()` - Live Apple Shortcuts with iCloud installation links and origins narrative.
+5. `get_eda_research(study_name)` - Dynamic multi-repo EDA research discovery and live README analysis.
+6. `get_personal_website_info()` - Live architectural overview and content for all 7 chapters.
+7. `get_website_chapter(chapter_identifier)` - Deep-dive into specific chapters (01-07, identity, spark, mind, frontier, sandbox, pulse, door).
+8. `get_current_music()` - Human-readable live Spotify status.
+9. `get_spotify_telemetry()` - Structured real-time Spotify telemetry with album art and playback state.
+10. `get_live_workbench_activity()` - Real-time GitHub commit feed and active workbench telemetry.
+11. `get_portfolio_resume_and_work()` - Live candidate profile, verified experience, education, certs, and portfolio Work tab links.
 
 ## HTTP Endpoints
 
