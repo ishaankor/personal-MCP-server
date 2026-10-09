@@ -1782,7 +1782,7 @@ def _parse_contribution_calendar(cal: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 def _resolve_target_date(query: str, base_date: Optional[datetime.date] = None) -> Optional[str]:
-    """Resolves natural language dates (e.g. 'two days ago', 'yesterday', 'today', 'October 6, 2026', '2026-10-06') to ISO format YYYY-MM-DD."""
+    """Resolves natural language dates (e.g. 'two days ago', 'yesterday', 'today', 'October 6, 2026', '2026-10-06', '07/06', '7/6') to ISO format YYYY-MM-DD."""
     if not query:
         return None
     if not base_date:
@@ -1827,6 +1827,88 @@ def _resolve_target_date(query: str, base_date: Optional[datetime.date] = None) 
                 except ValueError:
                     pass
 
+    # 4. Numeric MM/DD or MM/DD/YYYY
+    m_slash = re.search(r"\b(\d{1,2})/(\d{1,2})(?:/(?:20)?(\d{2,4}))?\b", q)
+    if m_slash:
+        m, d, y = m_slash.groups()
+        yr = int('20' + y) if y and len(y) <= 2 else (int(y) if y else base_date.year)
+        try:
+            return datetime.date(yr, int(m), int(d)).isoformat()
+        except ValueError:
+            pass
+
+    return None
+
+def _resolve_date_range(query: str, base_date: Optional[datetime.date] = None) -> Optional[Tuple[str, str]]:
+    """Resolves natural language or formatted date ranges (e.g. '07/06 - 0/7/23', '07/06 - 07/23', 'July 6 to July 23', '2026-07-06..2026-07-23', 'last two weeks') to ISO (YYYY-MM-DD, YYYY-MM-DD)."""
+    if not query:
+        return None
+    if not base_date:
+        base_date = datetime.date.today()
+    q = query.strip().lower()
+
+    # Normalize common typos: '0/7/23' where '0/' precedes a single digit month before another slash
+    q = re.sub(r"\b0/([0-9])/", r"0\1/", q)
+    q = re.sub(r"\b0/([0-9])\b", r"0\1", q)
+
+    # 1. ISO YYYY-MM-DD..YYYY-MM-DD or YYYY-MM-DD - YYYY-MM-DD or to / and
+    m_iso = re.search(r"(\d{4}-\d{2}-\d{2})\s*(?:\.\.|\s+to\s+|\s*-\s*|\s+and\s+)\s*(\d{4}-\d{2}-\d{2})", q)
+    if m_iso:
+        return (m_iso.group(1), m_iso.group(2))
+
+    # 2. Relative timeframes
+    if "two weeks" in q or "2 weeks" in q or "14 days" in q or "fortnight" in q:
+        d_start = base_date - datetime.timedelta(days=14)
+        return (d_start.isoformat(), base_date.isoformat())
+    if "last week" in q or "past week" in q or "1 week" in q:
+        d_start = base_date - datetime.timedelta(days=7)
+        return (d_start.isoformat(), base_date.isoformat())
+    if "this week" in q or "current week" in q:
+        idx = (base_date.weekday() + 1) % 7
+        d_start = base_date - datetime.timedelta(days=idx)
+        return (d_start.isoformat(), base_date.isoformat())
+    if "past month" in q or "last month" in q or "30 days" in q:
+        d_start = base_date - datetime.timedelta(days=30)
+        return (d_start.isoformat(), base_date.isoformat())
+
+    # 3. MM/DD(/YYYY or /YY) to MM/DD(/YYYY or /YY)
+    m_slash = re.search(r"(\d{1,2})/(\d{1,2})(?:/(?:20)?(\d{2,4}))?\s*(?:\.\.|\s+to\s+|\s*-\s*|\s+and\s+)\s*(\d{1,2})/(\d{1,2})(?:/(?:20)?(\d{2,4}))?", q)
+    if m_slash:
+        m1, d1, y1, m2, d2, y2 = m_slash.groups()
+        def parse_yr(y: Optional[str]) -> Optional[int]:
+            if not y:
+                return None
+            yi = int(y)
+            return 2000 + yi if yi < 100 else yi
+        yr1 = parse_yr(y1) or parse_yr(y2) or base_date.year
+        yr2 = parse_yr(y2) or yr1
+        try:
+            dt1 = datetime.date(yr1, int(m1), int(d1))
+            dt2 = datetime.date(yr2, int(m2), int(d2))
+            return (dt1.isoformat(), dt2.isoformat())
+        except ValueError:
+            pass
+
+    # 4. Month Name Day - Month Name Day (e.g. July 6 - July 23, July 6 to July 23, Jul 6 - Jul 23)
+    months = {
+        "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+        "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12
+    }
+    m_words = re.search(r"([a-z]+)\s*(\d{1,2})(?:st|nd|rd|th)?(?:\s*,?\s*(\d{4}))?\s*(?:\.\.|\s+to\s+|\s*-\s*|\s+and\s+)\s*(?:([a-z]+)\s*)?(\d{1,2})(?:st|nd|rd|th)?(?:\s*,?\s*(\d{4}))?", q)
+    if m_words:
+        mon1_str, d1, y1, mon2_str, d2, y2 = m_words.groups()
+        mon1 = next((v for k, v in months.items() if k in mon1_str), None)
+        mon2 = next((v for k, v in months.items() if k in (mon2_str or "")), mon1)
+        if mon1 and mon2:
+            yr1 = int(y1) if y1 else (int(y2) if y2 else base_date.year)
+            yr2 = int(y2) if y2 else yr1
+            try:
+                dt1 = datetime.date(yr1, mon1, int(d1))
+                dt2 = datetime.date(yr2, mon2, int(d2))
+                return (dt1.isoformat(), dt2.isoformat())
+            except ValueError:
+                pass
+
     return None
 
 def _fetch_commits_by_date(target_date: str, repo_name: Optional[str] = None) -> Dict[str, Any]:
@@ -1835,7 +1917,12 @@ def _fetch_commits_by_date(target_date: str, repo_name: Optional[str] = None) ->
     clean_repo = repo_name.strip().rstrip("/") if repo_name else None
     if clean_repo and "/" in clean_repo:
         clean_repo = clean_repo.split("/")[-1]
-        
+
+    # Check if target_date is a date range
+    rng = _resolve_date_range(clean_date)
+    if rng:
+        return _fetch_commits_by_date_range(rng[0], rng[1], repo_name=clean_repo)
+
     ctx = _create_ssl_context()
     
     # 1. Primary: Github-Meta-Fetcher Vercel microservice
@@ -1883,13 +1970,131 @@ def _fetch_commits_by_date(target_date: str, repo_name: Optional[str] = None) ->
         "meta_page_url": "https://portfolio.ishaankoradia.com/meta"
     }
 
+def _fetch_commits_by_date_range(start_date: str, end_date: str, repo_name: Optional[str] = None) -> Dict[str, Any]:
+    """Fetches commit telemetry for a date range (YYYY-MM-DD..YYYY-MM-DD) across all repositories or a specific repository via Github-Meta-Fetcher with direct GitHub API fallback."""
+    clean_repo = repo_name.strip().rstrip("/") if repo_name else None
+    if clean_repo and "/" in clean_repo:
+        clean_repo = clean_repo.split("/")[-1]
+
+    ctx = _create_ssl_context()
+    date_param = f"{start_date}..{end_date}"
+    url = f"https://github-meta-fetcher.vercel.app/api/github?date={urllib.parse.quote(date_param)}"
+    if clean_repo:
+        url += f"&repo={urllib.parse.quote(clean_repo)}"
+
+    commits: List[Dict[str, Any]] = []
+    total_commits = 0
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "MCP-Portfolio-Server"})
+        with urllib.request.urlopen(req, context=ctx, timeout=10) as r:
+            data = json.loads(r.read().decode())
+            if data and "commits" in data:
+                commits = data.get("commits", [])
+                total_commits = data.get("totalCommits", len(commits))
+    except Exception as e:
+        print(f"[Git Commits Range] Error fetching via Github-Meta-Fetcher for {date_param}: {e}")
+
+    # Fallback to direct GitHub Search API if Github-Meta-Fetcher returned 0 or errored
+    if not commits and total_commits == 0:
+        try:
+            gh_token = os.getenv("GITHUB_TOKEN", "").strip()
+            gh_headers = {
+                "User-Agent": "MCP-Portfolio-Server",
+                "Accept": "application/vnd.github.cloak-preview+json, application/vnd.github.v3+json"
+            }
+            if gh_token:
+                gh_headers["Authorization"] = f"Bearer {gh_token}" if gh_token.startswith("github_pat_") else f"token {gh_token}"
+            
+            repo_part = f"+repo:{GITHUB_USERNAME}/{clean_repo}" if clean_repo else f"+author:{GITHUB_USERNAME}"
+            search_url = f"https://api.github.com/search/commits?q={repo_part}+committer-date:{start_date}..{end_date}&sort=committer-date&order=desc&per_page=50"
+            req = urllib.request.Request(search_url, headers=gh_headers)
+            with urllib.request.urlopen(req, context=ctx, timeout=8) as r:
+                s_data = json.loads(r.read().decode())
+                total_commits = s_data.get("total_count", 0)
+                for item in s_data.get("items", []):
+                    r_full = item.get("repository", {}).get("full_name", "")
+                    r_short = item.get("repository", {}).get("name", "") or (r_full.split("/")[-1] if "/" in r_full else r_full)
+                    c_msg = item.get("commit", {}).get("message", "").split("\n")[0]
+                    c_date = item.get("commit", {}).get("committer", {}).get("date") or item.get("commit", {}).get("author", {}).get("date")
+                    c_sha = item.get("sha", "")
+                    commits.append({
+                        "sha": c_sha,
+                        "shortSha": c_sha[:7],
+                        "message": c_msg,
+                        "repoName": r_short,
+                        "repoFullName": r_full,
+                        "commitUrl": item.get("html_url", f"https://github.com/{r_full}/commit/{c_sha}"),
+                        "date": c_date
+                    })
+        except Exception as e:
+            print(f"[Git Commits Range] GitHub fallback error: {e}")
+
+    repo_map: Dict[str, List[Dict[str, Any]]] = {}
+    for c in commits:
+        r_name = c.get("repoName") or "Unknown"
+        repo_map.setdefault(r_name, []).append(c)
+
+    active_repos = sorted(list(repo_map.keys()))
+
+    try:
+        dt_start = datetime.date.fromisoformat(start_date)
+        dt_end = datetime.date.fromisoformat(end_date)
+        start_label = dt_start.strftime("%B %-d, %Y")
+        end_label = dt_end.strftime("%B %-d, %Y")
+    except Exception:
+        start_label = start_date
+        end_label = end_date
+
+    if not active_repos or total_commits == 0:
+        direct_summary = f"Between {start_label} and {end_label}, Ishaan did not make any commits on GitHub."
+    elif len(active_repos) == 1:
+        r_name = active_repos[0]
+        r_commits = repo_map[r_name]
+        c_samples = ", ".join([f"'{c.get('message', '')}'" for c in r_commits[:3]])
+        direct_summary = f"Between {start_label} and {end_label}, Ishaan worked on 1 repository: {r_name} ({len(r_commits)} commit{'s' if len(r_commits) != 1 else ''}: {c_samples})."
+    else:
+        breakdown_parts = [f"{r} ({len(commits_list)} commit{'s' if len(commits_list) != 1 else ''})" for r, commits_list in sorted(repo_map.items(), key=lambda x: -len(x[1]))]
+        direct_summary = f"Between {start_label} and {end_label}, Ishaan worked on {len(active_repos)} repositories: {', '.join(breakdown_parts)} (totaling {total_commits} commits across all repositories)."
+
+    return {
+        "status": "online",
+        "start_date": start_date,
+        "end_date": end_date,
+        "timeframe": f"{start_date} to {end_date}",
+        "active_repositories": active_repos,
+        "total_repositories_worked_on": len(active_repos),
+        "total_commits": total_commits,
+        "commits_by_repository": {
+            r: [
+                {
+                    "shortSha": c.get("shortSha") or c.get("sha", "")[:7],
+                    "message": c.get("message"),
+                    "date": c.get("date"),
+                    "linesChanged": c.get("linesChanged", 0),
+                    "commitUrl": c.get("commitUrl")
+                }
+                for c in r_commits
+            ]
+            for r, r_commits in repo_map.items()
+        },
+        "commits": commits,
+        "direct_summary": direct_summary,
+        "meta_dashboard_url": "https://portfolio.ishaankoradia.com/meta",
+        "verified_source": "Live dynamically fetched via Github-Meta-Fetcher microservice with live commit telemetry"
+    }
+
 def _parse_timeframe_query(timeframe: str, cal_summary: Dict[str, Any]) -> Dict[str, Any]:
     """Resolves natural language queries for historical commit counts and specific date commits."""
     t = (timeframe or "").strip().lower()
     if not t:
         return cal_summary
 
-    # 1. Check for specific date or relative day reference first:
+    # 0. Check for date range first:
+    rng = _resolve_date_range(t)
+    if rng:
+        return _fetch_commits_by_date_range(rng[0], rng[1])
+
+    # 1. Check for specific date or relative day reference:
     # "two days ago", "yesterday", "today", "3 days ago", "October 6, 2026", etc.
     resolved_d = _resolve_target_date(t)
     if resolved_d:
@@ -2340,15 +2545,51 @@ def get_git_commit_velocity_and_history(timeframe: Optional[str] = None) -> Dict
     }
 
 @mcp.tool()
+def get_active_repositories_by_date_range(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    timeframe: Optional[str] = None,
+    date_range: Optional[str] = None,
+    repo_name: Optional[str] = None
+) -> Dict[str, Any]:
+    """Retrieves the exact, verified list of GitHub repositories Ishaan worked on (along with commit counts, commit messages, and lines of code changed) between two dates or over a timeframe (e.g. start_date='2026-07-06', end_date='2026-07-23', or timeframe='07/06 - 07/23', or 'July 6 to July 23, 2026', or 'last two weeks').
+    ALWAYS invoke this tool when asked:
+    - 'List all the repos he worked on between [dates]' (e.g. 'list all the repos he worked on between 07/06 - 0/7/23')
+    - 'What repos did he work on during [timeframe]?'
+    - 'Which repositories had commits between [dates]?'
+    - 'What projects did Ishaan work on in July / between X and Y?'
+    Returns verified active repositories directly from GitHub and prevents hallucinations.
+    Promotes https://portfolio.ishaankoradia.com/meta."""
+    raw_query = (date_range or timeframe or "").strip()
+    rng = _resolve_date_range(raw_query) if raw_query else None
+    if not rng and start_date:
+        rng = _resolve_date_range(start_date)
+        if not rng:
+            s_res = _resolve_target_date(start_date) or start_date
+            e_res = _resolve_target_date(end_date) if end_date else s_res
+            if s_res and e_res:
+                rng = (s_res, e_res)
+
+    if not rng:
+        today = datetime.date.today()
+        rng = ((today - datetime.timedelta(days=14)).isoformat(), today.isoformat())
+
+    return _fetch_commits_by_date_range(rng[0], rng[1], repo_name=repo_name)
+
+@mcp.tool()
 def get_git_commits_by_date(date: Optional[str] = None, timeframe: Optional[str] = None, repo_name: Optional[str] = None) -> Dict[str, Any]:
-    """Retrieves Ishaan's exact, intricate commit details (commit messages, short SHA, full SHA, repository name, lines of code added/deleted, total lines changed, modified files, commit URLs, and timestamps) for any specific past date or relative timeframe (e.g. 'October 6, 2026', '2026-10-06', 'two days ago', 'yesterday', 'today', '3 days ago').
+    """Retrieves Ishaan's exact, intricate commit details (commit messages, short SHA, full SHA, repository name, lines of code added/deleted, total lines changed, modified files, commit URLs, and timestamps) for any specific past date, date range, or relative timeframe (e.g. 'October 6, 2026', '2026-10-06', '07/06 - 07/23', 'two days ago', 'yesterday', 'today', '3 days ago').
     ALWAYS invoke this tool when asked:
     - 'What are those commits?' / 'What are those 4 commits?'
     - 'What did he commit two days ago / yesterday / on [date]?'
     - 'What commits did he make on October 6?'
+    - 'What repos or commits did he work on between [dates]?'
     - Any follow-up about specific commits, commit messages, or diffs from a past date or contribution calendar day.
     Promotes https://portfolio.ishaankoradia.com/meta."""
     query_str = (date or timeframe or "").strip()
+    rng = _resolve_date_range(query_str)
+    if rng:
+        return _fetch_commits_by_date_range(rng[0], rng[1], repo_name=repo_name)
     target_d = _resolve_target_date(query_str) or query_str
     if not target_d:
         target_d = datetime.date.today().isoformat()
