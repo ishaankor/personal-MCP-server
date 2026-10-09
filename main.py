@@ -2143,6 +2143,38 @@ def _fetch_repo_timeframe_commits(repo_name: str, timeframe: Optional[str] = Non
         params = {"repo": clean_repo}
         if timeframe:
             params["timeframe"] = timeframe
+            if not since:
+                tf_lower = timeframe.lower().strip()
+                word_to_num = {
+                    'one': 1, 'a': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5,
+                    'six': 6, 'seven': 7, 'eight': 8, 'nine': 9, 'ten': 10, 'eleven': 11, 'twelve': 12
+                }
+                m_match = re.search(r'(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s*months?', tf_lower)
+                w_match = re.search(r'(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s*weeks?', tf_lower)
+                d_match = re.search(r'(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s*days?', tf_lower)
+                y_match = re.search(r'(\d+|one|two)\s*years?', tf_lower)
+                
+                now_dt = datetime.datetime.now(datetime.timezone.utc)
+                if m_match:
+                    val = m_match.group(1)
+                    count = int(val) if val.isdigit() else word_to_num.get(val, 1)
+                    since_dt = now_dt - datetime.timedelta(days=int(count * 30.5))
+                    params["since"] = since_dt.strftime("%Y-%m-%d")
+                elif w_match:
+                    val = w_match.group(1)
+                    count = int(val) if val.isdigit() else word_to_num.get(val, 1)
+                    since_dt = now_dt - datetime.timedelta(days=count * 7)
+                    params["since"] = since_dt.strftime("%Y-%m-%d")
+                elif d_match:
+                    val = d_match.group(1)
+                    count = int(val) if val.isdigit() else word_to_num.get(val, 1)
+                    since_dt = now_dt - datetime.timedelta(days=count)
+                    params["since"] = since_dt.strftime("%Y-%m-%d")
+                elif y_match:
+                    val = y_match.group(1)
+                    count = int(val) if val.isdigit() else word_to_num.get(val, 1)
+                    since_dt = now_dt - datetime.timedelta(days=count * 365)
+                    params["since"] = since_dt.strftime("%Y-%m-%d")
         if since:
             params["since"] = since
         if until:
