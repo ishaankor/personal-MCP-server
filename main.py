@@ -9,6 +9,7 @@ import difflib
 import uuid
 import ssl
 import datetime
+import calendar
 from dataclasses import dataclass, field
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -1781,54 +1782,93 @@ def _parse_contribution_calendar(cal: Dict[str, Any]) -> Dict[str, Any]:
         "meta_heatmap_url": "https://portfolio.ishaankoradia.com/meta"
     }
 
+MONTHS_MAP = {
+    'january': 1, 'jan': 1,
+    'february': 2, 'feb': 2,
+    'march': 3, 'mar': 3,
+    'april': 4, 'apr': 4,
+    'may': 5,
+    'june': 6, 'jun': 6,
+    'july': 7, 'jul': 7,
+    'august': 8, 'aug': 8,
+    'september': 9, 'sep': 9, 'sept': 9,
+    'october': 10, 'oct': 10,
+    'november': 11, 'nov': 11,
+    'december': 12, 'dec': 12
+}
+
+WORD_TO_NUM = {
+    'one': 1, 'a': 1, 'an': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5,
+    'six': 6, 'seven': 7, 'eight': 8, 'nine': 9, 'ten': 10,
+    'eleven': 11, 'twelve': 12, 'thirteen': 13, 'fourteen': 14,
+    'fifteen': 15, 'sixteen': 16, 'twenty': 20, 'thirty': 30,
+    'forty': 40, 'fifty': 50, 'sixty': 60, 'ninety': 90
+}
+
 def _resolve_target_date(query: str, base_date: Optional[datetime.date] = None) -> Optional[str]:
-    """Resolves natural language dates (e.g. 'two days ago', 'yesterday', 'today', 'October 6, 2026', '2026-10-06', '07/06', '7/6') to ISO format YYYY-MM-DD."""
+    """Resolves natural language dates (e.g. 'two days ago', 'yesterday', 'today', 'October 6, 2026', '6th of October 2026', '2026-10-06', '07/06', '7/6') to ISO format YYYY-MM-DD."""
     if not query:
         return None
     if not base_date:
         base_date = datetime.date.today()
     q = query.strip().lower()
 
-    # 1. Direct YYYY-MM-DD
-    m_iso = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", q)
+    # 1. Direct YYYY-MM-DD or YYYY/MM/DD or YYYY.MM.DD
+    m_iso = re.search(r'\b(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})\b', q)
     if m_iso:
-        return m_iso.group(1)
+        try:
+            return datetime.date(int(m_iso.group(1)), int(m_iso.group(2)), int(m_iso.group(3))).isoformat()
+        except ValueError:
+            pass
 
     # 2. Relative day references
-    word_to_num = {
-        "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
-        "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10
-    }
-    if "today" in q:
+    if 'today' in q or 'now' in q:
         return base_date.isoformat()
-    if "yesterday" in q:
+    if 'yesterday' in q:
+        if 'day before yesterday' in q:
+            return (base_date - datetime.timedelta(days=2)).isoformat()
         return (base_date - datetime.timedelta(days=1)).isoformat()
 
-    m_days = re.search(r"(\w+|\d+)\s+days?\s+ago", q)
+    m_days = re.search(r'(\w+|\d+)\s+days?\s+ago', q)
     if m_days:
         raw_val = m_days.group(1)
-        days_num = int(raw_val) if raw_val.isdigit() else word_to_num.get(raw_val, 0)
+        days_num = int(raw_val) if raw_val.isdigit() else WORD_TO_NUM.get(raw_val, 0)
         if days_num > 0:
             return (base_date - datetime.timedelta(days=days_num)).isoformat()
 
-    # 3. Explicit Month Day Year (e.g. "October 6, 2026", "Oct 6", "October 6")
-    months = {
-        "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
-        "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12
-    }
-    for m_prefix, m_num in months.items():
-        if m_prefix in q:
-            m_day = re.search(rf"{m_prefix}[a-z]*\s+(\d{{1,2}})(?:st|nd|rd|th)?(?:,?\s*(\d{{4}}))?", q)
-            if m_day:
-                day = int(m_day.group(1))
-                year = int(m_day.group(2)) if m_day.group(2) else base_date.year
+    m_weeks = re.search(r'(\w+|\d+)\s+weeks?\s+ago', q)
+    if m_weeks:
+        raw_val = m_weeks.group(1)
+        w_num = int(raw_val) if raw_val.isdigit() else WORD_TO_NUM.get(raw_val, 0)
+        if w_num > 0:
+            return (base_date - datetime.timedelta(weeks=w_num)).isoformat()
+
+    # 3. Explicit Named Month Day (e.g. 'October 6, 2026', '6 October 2026', 'Oct 6', '6th of October 2026')
+    for m_name, m_num in sorted(MONTHS_MAP.items(), key=lambda x: -len(x[0])):
+        if re.search(rf'\b{m_name}\b', q):
+            # Pattern A: Month Day, Year or Month Day (e.g. October 6, 2026, Oct 6, October 6th)
+            m_a = re.search(rf'\b{m_name}\s+([1-9]|[12]\d|3[01])(?!\d)(?:st|nd|rd|th)?(?:\s*,?\s*(\d{{4}}|\d{{2}}))?\b', q)
+            if m_a:
+                day = int(m_a.group(1))
+                raw_yr = m_a.group(2)
+                yr = (int(raw_yr) if len(raw_yr) == 4 else 2000 + int(raw_yr)) if raw_yr else base_date.year
                 try:
-                    return datetime.date(year, m_num, day).isoformat()
+                    return datetime.date(yr, m_num, day).isoformat()
+                except ValueError:
+                    pass
+            # Pattern B: Day Month Year or Day Month (e.g. 6 October 2026, 6th of October)
+            m_b = re.search(rf'\b([1-9]|[12]\d|3[01])(?!\d)(?:st|nd|rd|th)?\s+(?:of\s+)?{m_name}(?:\s*,?\s*(\d{{4}}|\d{{2}}))?\b', q)
+            if m_b:
+                day = int(m_b.group(1))
+                raw_yr = m_b.group(2)
+                yr = (int(raw_yr) if len(raw_yr) == 4 else 2000 + int(raw_yr)) if raw_yr else base_date.year
+                try:
+                    return datetime.date(yr, m_num, day).isoformat()
                 except ValueError:
                     pass
 
-    # 4. Numeric MM/DD or MM/DD/YYYY
-    m_slash = re.search(r"\b(\d{1,2})/(\d{1,2})(?:/(?:20)?(\d{2,4}))?\b", q)
+    # 4. Numeric MM/DD/YYYY or MM/DD/YY or MM/DD
+    m_slash = re.search(r'\b(\d{1,2})/(\d{1,2})(?:/(?:20)?(\d{2,4}))?\b', q)
     if m_slash:
         m, d, y = m_slash.groups()
         yr = int('20' + y) if y and len(y) <= 2 else (int(y) if y else base_date.year)
@@ -1840,7 +1880,7 @@ def _resolve_target_date(query: str, base_date: Optional[datetime.date] = None) 
     return None
 
 def _resolve_date_range(query: str, base_date: Optional[datetime.date] = None) -> Optional[Tuple[str, str]]:
-    """Resolves natural language or formatted date ranges (e.g. '07/06 - 0/7/23', '07/06 - 07/23', 'July 6 to July 23', '2026-07-06..2026-07-23', 'last two weeks') to ISO (YYYY-MM-DD, YYYY-MM-DD)."""
+    """Resolves natural language or formatted date ranges (e.g. '07/06 - 0/7/23', '07/06 - 07/23', 'July 6 to July 23', '2026-07-06..2026-07-23', 'in July 2026', 'March to May', 'in 2025', 'Q1 2026', 'last 30 days', 'past 6 weeks') to ISO (YYYY-MM-DD, YYYY-MM-DD)."""
     if not query:
         return None
     if not base_date:
@@ -1848,31 +1888,98 @@ def _resolve_date_range(query: str, base_date: Optional[datetime.date] = None) -
     q = query.strip().lower()
 
     # Normalize common typos: '0/7/23' where '0/' precedes a single digit month before another slash
-    q = re.sub(r"\b0/([0-9])/", r"0\1/", q)
-    q = re.sub(r"\b0/([0-9])\b", r"0\1", q)
+    q = re.sub(r'\b0/([0-9])/', r'0\1/', q)
+    q = re.sub(r'\b0/([0-9])\b', r'0\1', q)
 
-    # 1. ISO YYYY-MM-DD..YYYY-MM-DD or YYYY-MM-DD - YYYY-MM-DD or to / and
-    m_iso = re.search(r"(\d{4}-\d{2}-\d{2})\s*(?:\.\.|\s+to\s+|\s*-\s*|\s+and\s+)\s*(\d{4}-\d{2}-\d{2})", q)
+    # 1. ISO format range: YYYY-MM-DD..YYYY-MM-DD or YYYY-MM-DD to/ - /and YYYY-MM-DD
+    m_iso = re.search(r'(\d{4}-\d{2}-\d{2})\s*(?:\.\.|\s+to\s+|\s*[-–—]\s*|\s+and\s+|\s+through\s+|\s+thru\s+)\s*(\d{4}-\d{2}-\d{2})', q)
     if m_iso:
         return (m_iso.group(1), m_iso.group(2))
 
-    # 2. Relative timeframes
-    if "two weeks" in q or "2 weeks" in q or "14 days" in q or "fortnight" in q:
-        d_start = base_date - datetime.timedelta(days=14)
-        return (d_start.isoformat(), base_date.isoformat())
-    if "last week" in q or "past week" in q or "1 week" in q:
-        d_start = base_date - datetime.timedelta(days=7)
-        return (d_start.isoformat(), base_date.isoformat())
-    if "this week" in q or "current week" in q:
+    # 2. Directional queries: 'since [date]' or 'after [date]' or 'until [date]' or 'before [date]'
+    m_since = re.search(r'\b(?:since|after|starting\s+from)\s+(.+)', q)
+    if m_since:
+        s_date = _resolve_target_date(m_since.group(1), base_date)
+        if s_date:
+            return (s_date, base_date.isoformat())
+
+    m_until = re.search(r'\b(?:until|till|before|up\s+to|ending\s+at)\s+(.+)', q)
+    if m_until:
+        e_date = _resolve_target_date(m_until.group(1), base_date)
+        if e_date:
+            try:
+                dt_e = datetime.date.fromisoformat(e_date)
+                dt_s = dt_e - datetime.timedelta(days=365)
+                return (dt_s.isoformat(), e_date)
+            except Exception:
+                pass
+
+    # 3. Relative timeframes with arbitrary numbers
+    # Days (e.g. 'past 10 days', 'last 30 days', 'past 90 days')
+    m_rel_days = re.search(r'(?:last|past)\s+(\d+|\w+)\s+days?', q)
+    if m_rel_days:
+        val = m_rel_days.group(1)
+        n = int(val) if val.isdigit() else WORD_TO_NUM.get(val, 1)
+        return ((base_date - datetime.timedelta(days=n)).isoformat(), base_date.isoformat())
+
+    # Weeks (e.g. 'last 2 weeks', 'past 6 weeks', 'past 8 weeks')
+    m_rel_weeks = re.search(r'(?:last|past)\s+(\d+|\w+)\s+weeks?', q)
+    if m_rel_weeks:
+        val = m_rel_weeks.group(1)
+        n = int(val) if val.isdigit() else WORD_TO_NUM.get(val, 1)
+        return ((base_date - datetime.timedelta(days=n * 7)).isoformat(), base_date.isoformat())
+
+    # Months (e.g. 'past 3 months', 'last 6 months')
+    m_rel_months = re.search(r'(?:last|past)\s+(\d+|\w+)\s+months?', q)
+    if m_rel_months:
+        val = m_rel_months.group(1)
+        n = int(val) if val.isdigit() else WORD_TO_NUM.get(val, 1)
+        return ((base_date - datetime.timedelta(days=n * 30)).isoformat(), base_date.isoformat())
+
+    # Years (e.g. 'past 2 years')
+    m_rel_years = re.search(r'(?:last|past)\s+(\d+|\w+)\s+years?', q)
+    if m_rel_years:
+        val = m_rel_years.group(1)
+        n = int(val) if val.isdigit() else WORD_TO_NUM.get(val, 1)
+        return ((base_date - datetime.timedelta(days=n * 365)).isoformat(), base_date.isoformat())
+
+    # Specific named relative windows
+    if 'this week' in q or 'current week' in q:
         idx = (base_date.weekday() + 1) % 7
         d_start = base_date - datetime.timedelta(days=idx)
         return (d_start.isoformat(), base_date.isoformat())
-    if "past month" in q or "last month" in q or "30 days" in q:
-        d_start = base_date - datetime.timedelta(days=30)
+    if 'last week' in q or 'previous week' in q:
+        idx = (base_date.weekday() + 1) % 7
+        d_end = base_date - datetime.timedelta(days=idx + 1)
+        d_start = d_end - datetime.timedelta(days=6)
+        return (d_start.isoformat(), d_end.isoformat())
+    if 'this month' in q or 'current month' in q:
+        d_start = datetime.date(base_date.year, base_date.month, 1)
         return (d_start.isoformat(), base_date.isoformat())
+    if 'last month' in q or 'previous month' in q:
+        first_of_cur = datetime.date(base_date.year, base_date.month, 1)
+        last_of_prev = first_of_cur - datetime.timedelta(days=1)
+        first_of_prev = datetime.date(last_of_prev.year, last_of_prev.month, 1)
+        return (first_of_prev.isoformat(), last_of_prev.isoformat())
+    if 'this year' in q or 'current year' in q:
+        return (f'{base_date.year}-01-01', base_date.isoformat())
+    if 'last year' in q or 'previous year' in q:
+        py = base_date.year - 1
+        return (f'{py}-01-01', f'{py}-12-31')
 
-    # 3. MM/DD(/YYYY or /YY) to MM/DD(/YYYY or /YY)
-    m_slash = re.search(r"(\d{1,2})/(\d{1,2})(?:/(?:20)?(\d{2,4}))?\s*(?:\.\.|\s+to\s+|\s*-\s*|\s+and\s+)\s*(\d{1,2})/(\d{1,2})(?:/(?:20)?(\d{2,4}))?", q)
+    # 4. Quarters: Q1, Q2, Q3, Q4 (e.g. Q1 2026, Q3, in Q4 2025)
+    m_q = re.search(r'\bq([1-4])\b(?:\s*(?:of\s+)?(\d{4}))?', q)
+    if m_q:
+        q_num = int(m_q.group(1))
+        q_yr = int(m_q.group(2)) if m_q.group(2) else base_date.year
+        q_starts = {1: (1, 1), 2: (4, 1), 3: (7, 1), 4: (10, 1)}
+        q_ends = {1: (3, 31), 2: (6, 30), 3: (9, 30), 4: (12, 31)}
+        sm, sd = q_starts[q_num]
+        em, ed = q_ends[q_num]
+        return (f'{q_yr}-{sm:02d}-{sd:02d}', f'{q_yr}-{em:02d}-{ed:02d}')
+
+    # 5. Slashes: MM/DD(/YYYY or /YY) to MM/DD(/YYYY or /YY)
+    m_slash = re.search(r'(\d{1,2})/(\d{1,2})(?:/(?:20)?(\d{2,4}))?\s*(?:\.\.|\s+to\s+|\s*[-–—]\s*|\s+and\s+|\s+through\s+|\s+thru\s+)\s*(\d{1,2})/(\d{1,2})(?:/(?:20)?(\d{2,4}))?', q)
     if m_slash:
         m1, d1, y1, m2, d2, y2 = m_slash.groups()
         def parse_yr(y: Optional[str]) -> Optional[int]:
@@ -1889,25 +1996,60 @@ def _resolve_date_range(query: str, base_date: Optional[datetime.date] = None) -
         except ValueError:
             pass
 
-    # 4. Month Name Day - Month Name Day (e.g. July 6 - July 23, July 6 to July 23, Jul 6 - Jul 23)
-    months = {
-        "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
-        "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12
-    }
-    m_words = re.search(r"([a-z]+)\s*(\d{1,2})(?:st|nd|rd|th)?(?:\s*,?\s*(\d{4}))?\s*(?:\.\.|\s+to\s+|\s*-\s*|\s+and\s+)\s*(?:([a-z]+)\s*)?(\d{1,2})(?:st|nd|rd|th)?(?:\s*,?\s*(\d{4}))?", q)
-    if m_words:
-        mon1_str, d1, y1, mon2_str, d2, y2 = m_words.groups()
-        mon1 = next((v for k, v in months.items() if k in mon1_str), None)
-        mon2 = next((v for k, v in months.items() if k in (mon2_str or "")), mon1)
+    # 6. Month-Day to Month-Day ranges (e.g. July 6 to July 23, July 6 - July 23, Jul 6 - Jul 23, 6 July to 23 July)
+    month_names_pattern = '|'.join(sorted(MONTHS_MAP.keys(), key=lambda x: -len(x)))
+    m_word_range = re.search(
+        rf'({month_names_pattern})\s*(\d{{1,2}})(?:st|nd|rd|th)?(?:\s*,?\s*(\d{{4}}|\d{{2}}))?\s*(?:\.\.|\s+to\s+|\s*[-–—]\s*|\s+and\s+|\s+through\s+|\s+thru\s+)\s*(?:({month_names_pattern})\s*)?(\d{{1,2}})(?:st|nd|rd|th)?(?:\s*,?\s*(\d{{4}}|\d{{2}}))?',
+        q
+    )
+    if m_word_range:
+        mon1_str, d1, y1, mon2_str, d2, y2 = m_word_range.groups()
+        mon1 = MONTHS_MAP.get(mon1_str)
+        mon2 = MONTHS_MAP.get(mon2_str) if mon2_str else mon1
         if mon1 and mon2:
-            yr1 = int(y1) if y1 else (int(y2) if y2 else base_date.year)
-            yr2 = int(y2) if y2 else yr1
+            def parse_yr_w(y: Optional[str]) -> Optional[int]:
+                if not y:
+                    return None
+                yi = int(y)
+                return 2000 + yi if yi < 100 else yi
+            yr1 = parse_yr_w(y1) or parse_yr_w(y2) or base_date.year
+            yr2 = parse_yr_w(y2) or yr1
             try:
                 dt1 = datetime.date(yr1, mon1, int(d1))
                 dt2 = datetime.date(yr2, mon2, int(d2))
                 return (dt1.isoformat(), dt2.isoformat())
             except ValueError:
                 pass
+
+    # 7. Month-to-Month ranges without specific days (e.g. 'March to May 2026', 'between January and March', 'June through August')
+    m_m2m = re.search(
+        rf'\b(?:from|between)?\s*({month_names_pattern})\s*(?:\s*,?\s*(\d{{4}}))?\s*(?:\.\.|\s+to\s+|\s*[-–—]\s*|\s+and\s+|\s+through\s+|\s+thru\s+)\s*({month_names_pattern})(?:\s*,?\s*(\d{{4}}))?\b',
+        q
+    )
+    if m_m2m:
+        m1_name, y1_str, m2_name, y2_str = m_m2m.groups()
+        mon1 = MONTHS_MAP.get(m1_name)
+        mon2 = MONTHS_MAP.get(m2_name)
+        if mon1 and mon2:
+            yr1 = int(y1_str) if y1_str else (int(y2_str) if y2_str else base_date.year)
+            yr2 = int(y2_str) if y2_str else yr1
+            _, last_day2 = calendar.monthrange(yr2, mon2)
+            return (f'{yr1}-{mon1:02d}-01', f'{yr2}-{mon2:02d}-{last_day2:02d}')
+
+    # 8. Single full-month queries for ANY of the 12 months (e.g. 'in July', 'in July 2026', 'during March 2025', 'in November')
+    for m_name, m_num in sorted(MONTHS_MAP.items(), key=lambda x: -len(x[0])):
+        m_single = re.search(rf'\b(?:in|during|for|throughout|all\s+of)?\s*{m_name}\b(?:\s*,?\s*(\d{{4}}))?', q)
+        if m_single and not re.search(rf'\b{m_name}\s+\d{{1,2}}\b', q) and not re.search(rf'\b\d{{1,2}}(?:st|nd|rd|th)?\s+(?:of\s+)?{m_name}\b', q):
+            yr = int(m_single.group(1)) if m_single.group(1) else base_date.year
+            _, last_day = calendar.monthrange(yr, m_num)
+            return (f'{yr}-{m_num:02d}-01', f'{yr}-{m_num:02d}-{last_day:02d}')
+
+    # 9. Single full-year queries (e.g. 'in 2025', 'during 2024', 'in 2026')
+    if not any(m in q for m in MONTHS_MAP) and not re.search(r'\d{1,2}/\d{1,2}', q):
+        m_year = re.search(r'\b(?:in|during|throughout|for|year)?\s*(20\d{2})\b', q)
+        if m_year:
+            yr = int(m_year.group(1))
+            return (f'{yr}-01-01', f'{yr}-12-31')
 
     return None
 
@@ -2092,7 +2234,42 @@ def _parse_timeframe_query(timeframe: str, cal_summary: Dict[str, Any]) -> Dict[
     # 0. Check for date range first:
     rng = _resolve_date_range(t)
     if rng:
-        return _fetch_commits_by_date_range(rng[0], rng[1])
+        start_d, end_d = rng
+        range_res = _fetch_commits_by_date_range(start_d, end_d)
+        cal_map = cal_summary.get("daily_contributions_map", {})
+        total_calendar = 0
+        try:
+            d_curr = datetime.date.fromisoformat(start_d)
+            d_last = datetime.date.fromisoformat(end_d)
+            while d_curr <= d_last:
+                total_calendar += cal_map.get(d_curr.isoformat(), 0)
+                d_curr += datetime.timedelta(days=1)
+        except Exception:
+            total_calendar = 0
+
+        range_res["requested_timeframe"] = timeframe
+        range_res["total_contributions_calendar"] = total_calendar
+        public_commits_count = range_res.get("total_commits", 0)
+        repos_list = range_res.get("active_repositories", [])
+        repos_str = ", ".join(repos_list) if repos_list else "no public repositories"
+
+        if total_calendar > public_commits_count and public_commits_count > 0:
+            range_res["direct_answer"] = (
+                f"Between {start_d} and {end_d} ({timeframe}), Ishaan logged {total_calendar} contributions on his GitHub profile heatmap (including private repositories/events). "
+                f"{public_commits_count} of these are detailed commits across his public repositories ({repos_str})."
+            )
+        elif total_calendar > 0 and public_commits_count == 0:
+            range_res["direct_answer"] = (
+                f"Between {start_d} and {end_d} ({timeframe}), Ishaan logged {total_calendar} contributions on his GitHub profile heatmap (across private repositories/push events). No public repository commits were recorded in this timeframe."
+            )
+        elif public_commits_count > 0:
+            range_res["direct_answer"] = (
+                f"Between {start_d} and {end_d} ({timeframe}), Ishaan made {public_commits_count} commits across {repos_str}."
+            )
+        else:
+            range_res["direct_answer"] = f"Between {start_d} and {end_d} ({timeframe}), Ishaan did not make any commits on GitHub."
+
+        return range_res
 
     # 1. Check for specific date or relative day reference:
     # "two days ago", "yesterday", "today", "3 days ago", "October 6, 2026", etc.
@@ -2203,31 +2380,16 @@ def _parse_timeframe_query(timeframe: str, cal_summary: Dict[str, Any]) -> Dict[
         }
         
     monthly = cal_summary.get("monthly_breakdown", {})
-    for m_key, count in monthly.items():
-        if "sept" in t and "-09" in m_key:
-            return {
-                "requested_timeframe": "September 2026",
-                "total_commits": count,
-                "direct_answer": f"In September 2026, Ishaan made {count} commits/contributions on GitHub."
-            }
-        if "aug" in t and "-08" in m_key:
-            return {
-                "requested_timeframe": "August 2026",
-                "total_commits": count,
-                "direct_answer": f"In August 2026, Ishaan made {count} commits/contributions on GitHub."
-            }
-        if "oct" in t and "-10" in m_key:
-            return {
-                "requested_timeframe": "October 2026",
-                "total_commits": count,
-                "direct_answer": f"In October 2026 (month-to-date), Ishaan has made {count} commits/contributions on GitHub."
-            }
-        if "jul" in t and "-07" in m_key:
-            return {
-                "requested_timeframe": "July 2026",
-                "total_commits": count,
-                "direct_answer": f"In July 2026, Ishaan made {count} commits/contributions on GitHub."
-            }
+    for m_name, m_num in sorted(MONTHS_MAP.items(), key=lambda x: -len(x[0])):
+        if m_name in t:
+            month_suffix = f"-{m_num:02d}"
+            for m_key, count in sorted(monthly.items(), reverse=True):
+                if m_key.endswith(month_suffix):
+                    return {
+                        "requested_timeframe": f"{m_name.capitalize()} ({m_key})",
+                        "total_commits": count,
+                        "direct_answer": f"In {m_name.capitalize()} ({m_key}), Ishaan made {count} commits/contributions on GitHub."
+                    }
 
     return {
         "requested_timeframe": timeframe,
@@ -2370,37 +2532,46 @@ def _fetch_repo_timeframe_commits(repo_name: str, timeframe: Optional[str] = Non
         if timeframe:
             params["timeframe"] = timeframe
             if not since:
-                tf_lower = timeframe.lower().strip()
-                word_to_num = {
-                    'one': 1, 'a': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5,
-                    'six': 6, 'seven': 7, 'eight': 8, 'nine': 9, 'ten': 10, 'eleven': 11, 'twelve': 12
-                }
-                m_match = re.search(r'(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s*months?', tf_lower)
-                w_match = re.search(r'(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s*weeks?', tf_lower)
-                d_match = re.search(r'(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s*days?', tf_lower)
-                y_match = re.search(r'(\d+|one|two)\s*years?', tf_lower)
-                
-                now_dt = datetime.datetime.now(datetime.timezone.utc)
-                if m_match:
-                    val = m_match.group(1)
-                    count = int(val) if val.isdigit() else word_to_num.get(val, 1)
-                    since_dt = now_dt - datetime.timedelta(days=int(count * 30.5))
-                    params["since"] = since_dt.strftime("%Y-%m-%d")
-                elif w_match:
-                    val = w_match.group(1)
-                    count = int(val) if val.isdigit() else word_to_num.get(val, 1)
-                    since_dt = now_dt - datetime.timedelta(days=count * 7)
-                    params["since"] = since_dt.strftime("%Y-%m-%d")
-                elif d_match:
-                    val = d_match.group(1)
-                    count = int(val) if val.isdigit() else word_to_num.get(val, 1)
-                    since_dt = now_dt - datetime.timedelta(days=count)
-                    params["since"] = since_dt.strftime("%Y-%m-%d")
-                elif y_match:
-                    val = y_match.group(1)
-                    count = int(val) if val.isdigit() else word_to_num.get(val, 1)
-                    since_dt = now_dt - datetime.timedelta(days=count * 365)
-                    params["since"] = since_dt.strftime("%Y-%m-%d")
+                rng = _resolve_date_range(timeframe)
+                if rng:
+                    since = rng[0]
+                    until = rng[1]
+                else:
+                    target_d = _resolve_target_date(timeframe)
+                    if target_d:
+                        params["date"] = target_d
+                    else:
+                        tf_lower = timeframe.lower().strip()
+                        word_to_num = {
+                            'one': 1, 'a': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5,
+                            'six': 6, 'seven': 7, 'eight': 8, 'nine': 9, 'ten': 10, 'eleven': 11, 'twelve': 12
+                        }
+                        m_match = re.search(r'(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s*months?', tf_lower)
+                        w_match = re.search(r'(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s*weeks?', tf_lower)
+                        d_match = re.search(r'(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s*days?', tf_lower)
+                        y_match = re.search(r'(\d+|one|two)\s*years?', tf_lower)
+                        
+                        now_dt = datetime.datetime.now(datetime.timezone.utc)
+                        if m_match:
+                            val = m_match.group(1)
+                            count = int(val) if val.isdigit() else word_to_num.get(val, 1)
+                            since_dt = now_dt - datetime.timedelta(days=int(count * 30.5))
+                            params["since"] = since_dt.strftime("%Y-%m-%d")
+                        elif w_match:
+                            val = w_match.group(1)
+                            count = int(val) if val.isdigit() else word_to_num.get(val, 1)
+                            since_dt = now_dt - datetime.timedelta(days=count * 7)
+                            params["since"] = since_dt.strftime("%Y-%m-%d")
+                        elif d_match:
+                            val = d_match.group(1)
+                            count = int(val) if val.isdigit() else word_to_num.get(val, 1)
+                            since_dt = now_dt - datetime.timedelta(days=count)
+                            params["since"] = since_dt.strftime("%Y-%m-%d")
+                        elif y_match:
+                            val = y_match.group(1)
+                            count = int(val) if val.isdigit() else word_to_num.get(val, 1)
+                            since_dt = now_dt - datetime.timedelta(days=count * 365)
+                            params["since"] = since_dt.strftime("%Y-%m-%d")
         if since:
             params["since"] = since
         if until:
