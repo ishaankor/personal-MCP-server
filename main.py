@@ -10,6 +10,7 @@ import uuid
 import ssl
 import datetime
 import calendar
+import requests
 from dataclasses import dataclass, field
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -1880,12 +1881,16 @@ def _resolve_target_date(query: str, base_date: Optional[datetime.date] = None) 
     return None
 
 def _resolve_date_range(query: str, base_date: Optional[datetime.date] = None) -> Optional[Tuple[str, str]]:
-    """Resolves natural language or formatted date ranges (e.g. '07/06 - 0/7/23', '07/06 - 07/23', 'July 6 to July 23', '2026-07-06..2026-07-23', 'in July 2026', 'March to May', 'in 2025', 'Q1 2026', 'last 30 days', 'past 6 weeks') to ISO (YYYY-MM-DD, YYYY-MM-DD)."""
+    """Resolves natural language or formatted date ranges (e.g. '07/06 - 0/7/23', '07/06 - 07/23', 'July 6 to July 23', '2026-07-06..2026-07-23', 'in July 2026', 'March to May', 'in 2025', 'Q1 2026', 'last 30 days', 'past 6 weeks', 'all time', 'start to present') to ISO (YYYY-MM-DD, YYYY-MM-DD) or ('all', YYYY-MM-DD)."""
     if not query:
         return None
     if not base_date:
         base_date = datetime.date.today()
     q = query.strip().lower()
+
+    # Lifetime / complete account history
+    if any(k in q for k in ['start to present', 'beginning to present', 'all time', 'lifetime', 'all history', 'whole history', 'entire history', 'from start', 'since the beginning']) or q in ('all', 'lifetime', 'all time'):
+        return ('all', base_date.isoformat())
 
     # Normalize common typos: '0/7/23' where '0/' precedes a single digit month before another slash
     q = re.sub(r'\b0/([0-9])/', r'0\1/', q)
@@ -2072,9 +2077,9 @@ def _fetch_commits_by_date(target_date: str, repo_name: Optional[str] = None) ->
         url = f"https://github-meta-fetcher.vercel.app/api/github?date={urllib.parse.quote(clean_date)}"
         if clean_repo:
             url += f"&repo={urllib.parse.quote(clean_repo)}"
-        req = urllib.request.Request(url, headers={"User-Agent": "MCP-Portfolio-Server"})
-        with urllib.request.urlopen(req, context=ctx, timeout=8) as r:
-            data = json.loads(r.read().decode())
+        res = requests.get(url, headers={"User-Agent": "MCP-Portfolio-Server"}, timeout=10)
+        if res.status_code == 200:
+            data = res.json()
             if data and data.get("status") == "online" and "commits" in data:
                 commits = data.get("commits", [])
                 summary_lines = []
@@ -2118,26 +2123,31 @@ def _fetch_commits_by_date_range(start_date: str, end_date: str, repo_name: Opti
     if clean_repo and "/" in clean_repo:
         clean_repo = clean_repo.split("/")[-1]
 
-    ctx = _create_ssl_context()
-    date_param = f"{start_date}..{end_date}"
+    is_lifetime = start_date in ("all", "lifetime") or end_date in ("all", "lifetime")
+    date_param = "all" if is_lifetime else f"{start_date}..{end_date}"
     url = f"https://github-meta-fetcher.vercel.app/api/github?date={urllib.parse.quote(date_param)}"
     if clean_repo:
         url += f"&repo={urllib.parse.quote(clean_repo)}"
 
     commits: List[Dict[str, Any]] = []
     total_commits = 0
+    fetcher_active_repos: List[str] = []
+    fetcher_repo_counts: Dict[str, int] = {}
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "MCP-Portfolio-Server"})
-        with urllib.request.urlopen(req, context=ctx, timeout=10) as r:
-            data = json.loads(r.read().decode())
+        res = requests.get(url, headers={"User-Agent": "MCP-Portfolio-Server"}, timeout=12)
+        if res.status_code == 200:
+            data = res.json()
             if data and "commits" in data:
                 commits = data.get("commits", [])
                 total_commits = data.get("totalCommits", len(commits))
+                fetcher_active_repos = data.get("activeRepositories", [])
+                fetcher_repo_counts = data.get("repositoryCommitCounts", {})
     except Exception as e:
         print(f"[Git Commits Range] Error fetching via Github-Meta-Fetcher for {date_param}: {e}")
 
-    # Fallback to direct GitHub Search API if Github-Meta-Fetcher returned 0 or errored
-    if not commits and total_commits == 0:
+    # If Github-Meta-Fetcher was unavailable, or truncated results without activeRepositories:
+    # Query direct GitHub Search API with pagination to ensure ALL active repositories and exact commit counts are captured!
+    if (not commits and total_commits == 0) or (total_commits > len(commits) and not fetcher_active_repos):
         try:
             gh_token = os.getenv("GITHUB_TOKEN", "").strip()
             gh_headers = {
@@ -2148,18 +2158,29 @@ def _fetch_commits_by_date_range(start_date: str, end_date: str, repo_name: Opti
                 gh_headers["Authorization"] = f"Bearer {gh_token}" if gh_token.startswith("github_pat_") else f"token {gh_token}"
             
             repo_part = f"+repo:{GITHUB_USERNAME}/{clean_repo}" if clean_repo else f"+author:{GITHUB_USERNAME}"
-            search_url = f"https://api.github.com/search/commits?q={repo_part}+committer-date:{start_date}..{end_date}&sort=committer-date&order=desc&per_page=50"
-            req = urllib.request.Request(search_url, headers=gh_headers)
-            with urllib.request.urlopen(req, context=ctx, timeout=8) as r:
-                s_data = json.loads(r.read().decode())
-                total_commits = s_data.get("total_count", 0)
-                for item in s_data.get("items", []):
+            date_filter = "" if is_lifetime else f"+committer-date:{start_date}..{end_date}"
+            paginated_commits: List[Dict[str, Any]] = []
+            page = 1
+            max_pages = 10  # Up to 1,000 commits (GitHub Search API max limit)
+            search_total = total_commits
+
+            while page <= max_pages:
+                search_url = f"https://api.github.com/search/commits?q={repo_part}{date_filter}&sort=committer-date&order=desc&per_page=100&page={page}"
+                s_res = requests.get(search_url, headers=gh_headers, timeout=10)
+                if s_res.status_code != 200:
+                    break
+                s_data = s_res.json()
+                search_total = s_data.get("total_count", search_total)
+                items = s_data.get("items", [])
+                if not items:
+                    break
+                for item in items:
                     r_full = item.get("repository", {}).get("full_name", "")
                     r_short = item.get("repository", {}).get("name", "") or (r_full.split("/")[-1] if "/" in r_full else r_full)
                     c_msg = item.get("commit", {}).get("message", "").split("\n")[0]
                     c_date = item.get("commit", {}).get("committer", {}).get("date") or item.get("commit", {}).get("author", {}).get("date")
                     c_sha = item.get("sha", "")
-                    commits.append({
+                    paginated_commits.append({
                         "sha": c_sha,
                         "shortSha": c_sha[:7],
                         "message": c_msg,
@@ -2168,6 +2189,13 @@ def _fetch_commits_by_date_range(start_date: str, end_date: str, repo_name: Opti
                         "commitUrl": item.get("html_url", f"https://github.com/{r_full}/commit/{c_sha}"),
                         "date": c_date
                     })
+                if len(paginated_commits) >= search_total:
+                    break
+                page += 1
+
+            if paginated_commits:
+                commits = paginated_commits
+                total_commits = search_total
         except Exception as e:
             print(f"[Git Commits Range] GitHub fallback error: {e}")
 
@@ -2176,27 +2204,35 @@ def _fetch_commits_by_date_range(start_date: str, end_date: str, repo_name: Opti
         r_name = c.get("repoName") or "Unknown"
         repo_map.setdefault(r_name, []).append(c)
 
-    active_repos = sorted(list(repo_map.keys()))
+    active_repos = fetcher_active_repos if fetcher_active_repos else sorted(list(repo_map.keys()))
+    repo_counts = fetcher_repo_counts if fetcher_repo_counts else {r: len(c_list) for r, c_list in sorted(repo_map.items(), key=lambda x: -len(x[1]))}
 
-    try:
-        dt_start = datetime.date.fromisoformat(start_date)
-        dt_end = datetime.date.fromisoformat(end_date)
-        start_label = dt_start.strftime("%B %-d, %Y")
-        end_label = dt_end.strftime("%B %-d, %Y")
-    except Exception:
-        start_label = start_date
-        end_label = end_date
+    if is_lifetime:
+        start_label = "the beginning of Ishaan's GitHub journey"
+        end_label = "the present day"
+        timeframe_label = "Across his entire GitHub history"
+    else:
+        try:
+            dt_start = datetime.date.fromisoformat(start_date)
+            dt_end = datetime.date.fromisoformat(end_date)
+            start_label = dt_start.strftime("%B %-d, %Y")
+            end_label = dt_end.strftime("%B %-d, %Y")
+        except Exception:
+            start_label = start_date
+            end_label = end_date
+        timeframe_label = f"Between {start_label} and {end_label}"
 
     if not active_repos or total_commits == 0:
-        direct_summary = f"Between {start_label} and {end_label}, Ishaan did not make any commits on GitHub."
+        direct_summary = f"{timeframe_label}, Ishaan did not make any commits on GitHub."
     elif len(active_repos) == 1:
         r_name = active_repos[0]
-        r_commits = repo_map[r_name]
+        r_commits = repo_map.get(r_name, [])
         c_samples = ", ".join([f"'{c.get('message', '')}'" for c in r_commits[:3]])
-        direct_summary = f"Between {start_label} and {end_label}, Ishaan worked on 1 repository: {r_name} ({len(r_commits)} commit{'s' if len(r_commits) != 1 else ''}: {c_samples})."
+        c_desc = f": {c_samples}" if c_samples else ""
+        direct_summary = f"{timeframe_label}, Ishaan worked on 1 repository: {r_name} ({len(r_commits)} commit{'s' if len(r_commits) != 1 else ''}{c_desc})."
     else:
-        breakdown_parts = [f"{r} ({len(commits_list)} commit{'s' if len(commits_list) != 1 else ''})" for r, commits_list in sorted(repo_map.items(), key=lambda x: -len(x[1]))]
-        direct_summary = f"Between {start_label} and {end_label}, Ishaan worked on {len(active_repos)} repositories: {', '.join(breakdown_parts)} (totaling {total_commits} commits across all repositories)."
+        breakdown_parts = [f"{r} ({count} commit{'s' if count != 1 else ''})" for r, count in repo_counts.items()]
+        direct_summary = f"{timeframe_label}, Ishaan worked on {len(active_repos)} repositories: {', '.join(breakdown_parts)} (totaling {total_commits} commits across all repositories)."
 
     return {
         "status": "online",
@@ -2206,6 +2242,7 @@ def _fetch_commits_by_date_range(start_date: str, end_date: str, repo_name: Opti
         "active_repositories": active_repos,
         "total_repositories_worked_on": len(active_repos),
         "total_commits": total_commits,
+        "repository_commit_counts": repo_counts,
         "commits_by_repository": {
             r: [
                 {
@@ -2215,14 +2252,14 @@ def _fetch_commits_by_date_range(start_date: str, end_date: str, repo_name: Opti
                     "linesChanged": c.get("linesChanged", 0),
                     "commitUrl": c.get("commitUrl")
                 }
-                for c in r_commits
+                for c in r_commits[:10]
             ]
-            for r, r_commits in repo_map.items()
+            for r, r_commits in sorted(repo_map.items(), key=lambda x: -len(x[1]))
         },
-        "commits": commits,
+        "commits": commits[:30],
         "direct_summary": direct_summary,
         "meta_dashboard_url": "https://portfolio.ishaankoradia.com/meta",
-        "verified_source": "Live dynamically fetched via Github-Meta-Fetcher microservice with live commit telemetry"
+        "verified_source": "Live dynamically fetched via GitHub Commit Telemetry & Github-Meta-Fetcher microservice"
     }
 
 def _parse_timeframe_query(timeframe: str, cal_summary: Dict[str, Any]) -> Dict[str, Any]:
