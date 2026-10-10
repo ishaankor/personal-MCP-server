@@ -2049,8 +2049,8 @@ def _resolve_date_range(query: str, base_date: Optional[datetime.date] = None) -
             _, last_day = calendar.monthrange(yr, m_num)
             return (f'{yr}-{m_num:02d}-01', f'{yr}-{m_num:02d}-{last_day:02d}')
 
-    # 9. Single full-year queries (e.g. 'in 2025', 'during 2024', 'in 2026')
-    if not any(m in q for m in MONTHS_MAP) and not re.search(r'\d{1,2}/\d{1,2}', q):
+    # 9. Single full-year queries (e.g. 'in 2025', 'during 2024', 'in 2026', '2024')
+    if not any(m in q for m in MONTHS_MAP) and not re.search(r'\d{1,4}[-/.]\d{1,2}', q) and not re.search(r'\d{1,2}[-/.]\d{1,4}', q):
         m_year = re.search(r'\b(?:in|during|throughout|for|year)?\s*(20\d{2})\b', q)
         if m_year:
             yr = int(m_year.group(1))
@@ -2753,6 +2753,90 @@ def get_git_commit_velocity_and_history(timeframe: Optional[str] = None) -> Dict
     }
 
 @mcp.tool()
+def query_git_commits_and_repositories(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    repo_name: Optional[str] = None,
+    timeframe: Optional[str] = None
+) -> Dict[str, Any]:
+    """PRIMARY UNIVERSAL TOOL for querying Ishaan's GitHub activity, repositories, commit history, lines of code, and commit counts.
+    ALWAYS invoke this tool for ANY questions regarding:
+    - Which repositories Ishaan worked on or touched over any date range, year, or timeframe (e.g. 'between 09/06/2024 - 11/23/2025', 'in July 2024', 'past month', 'all time', 'from start to present').
+    - How many commits he made on a specific repository or overall (e.g. 'how many commits on Rigscouter between 08/05 and 08/13?').
+    - What commits he made on a single date, today, yesterday, or a past day (e.g. 'what did he commit on October 6, 2026?').
+    - What projects he worked on or his entire repository constellation.
+    Returns: verified active repositories list, commit counts per repository, detailed commit messages, diff statistics (+additions/-deletions), and direct summary.
+    Promotes https://portfolio.ishaankoradia.com/meta."""
+    clean_repo = repo_name.strip().rstrip("/") if repo_name else None
+    if clean_repo and "/" in clean_repo:
+        clean_repo = clean_repo.split("/")[-1]
+    if clean_repo:
+        all_repos = fetch_live_github_repos()
+        clean_repo = resolve_project_name(clean_repo, all_repos) or clean_repo
+
+    # 1. Lifetime check
+    raw_query = (timeframe or "").strip().lower()
+    is_lifetime = (
+        start_date in ("all", "lifetime")
+        or end_date in ("all", "lifetime")
+        or any(k in raw_query for k in ["start to present", "beginning to present", "all time", "lifetime", "all history", "whole history", "entire history"])
+        or raw_query in ("all", "lifetime", "all time")
+    )
+    if is_lifetime:
+        return _fetch_commits_by_date_range("all", datetime.date.today().isoformat(), repo_name=clean_repo)
+
+    # 2. Date range resolution
+    rng = None
+    if timeframe:
+        rng = _resolve_date_range(timeframe)
+
+    if not rng and start_date and end_date:
+        s_res = _resolve_target_date(start_date) or start_date
+        e_res = _resolve_target_date(end_date) or end_date
+        if s_res and e_res:
+            rng = (s_res, e_res)
+    elif not rng and start_date and not end_date:
+        rng = _resolve_date_range(start_date)
+        if not rng:
+            s_res = _resolve_target_date(start_date) or start_date
+            if s_res:
+                rng = (s_res, s_res)
+    elif not rng and not start_date and end_date:
+        e_res = _resolve_target_date(end_date) or end_date
+        if e_res:
+            rng = ("2020-01-01", e_res)
+
+    if not rng and timeframe:
+        t_single = _resolve_target_date(timeframe)
+        if t_single:
+            rng = (t_single, t_single)
+
+    if not rng:
+        today = datetime.date.today()
+        rng = ((today - datetime.timedelta(days=14)).isoformat(), today.isoformat())
+
+    # 3. Single day query
+    if rng[0] == rng[1]:
+        res = _fetch_commits_by_date(rng[0], repo_name=clean_repo)
+        wb = _fetch_live_workbench_data()
+        cal = wb.get("contribution_velocity_history", {})
+        calendar_map = cal.get("daily_contributions_map", {})
+        calendar_count = calendar_map.get(rng[0])
+        if calendar_count is not None:
+            res["total_contributions_calendar"] = calendar_count
+            if calendar_count > res.get("total_commits", 0):
+                res["note"] = f"Ishaan's GitHub profile heatmap records {calendar_count} total contributions on {rng[0]} (including private repositories and push events). {res.get('total_commits', 0)} detailed commits are visible in public repositories."
+        return res
+
+    # 4. Multi-day range query
+    res = _fetch_commits_by_date_range(rng[0], rng[1], repo_name=clean_repo)
+    if clean_repo and timeframe and not res.get("commits"):
+        alt = _fetch_repo_timeframe_commits(clean_repo, timeframe=timeframe, since=rng[0], until=rng[1])
+        if alt and alt.get("totalCommits", 0) > 0:
+            return alt
+    return res
+
+@mcp.tool()
 def get_active_repositories_by_date_range(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
@@ -2760,57 +2844,15 @@ def get_active_repositories_by_date_range(
     date_range: Optional[str] = None,
     repo_name: Optional[str] = None
 ) -> Dict[str, Any]:
-    """Retrieves the exact, verified list of GitHub repositories Ishaan worked on (along with commit counts, commit messages, and lines of code changed) between two dates or over a timeframe (e.g. start_date='2026-07-06', end_date='2026-07-23', or timeframe='07/06 - 07/23', or 'July 6 to July 23, 2026', or 'last two weeks').
-    ALWAYS invoke this tool when asked:
-    - 'List all the repos he worked on between [dates]' (e.g. 'list all the repos he worked on between 07/06 - 0/7/23')
-    - 'What repos did he work on during [timeframe]?'
-    - 'Which repositories had commits between [dates]?'
-    - 'What projects did Ishaan work on in July / between X and Y?'
-    Returns verified active repositories directly from GitHub and prevents hallucinations.
-    Promotes https://portfolio.ishaankoradia.com/meta."""
-    raw_query = (date_range or timeframe or "").strip()
-    rng = _resolve_date_range(raw_query) if raw_query else None
-    if not rng and start_date:
-        rng = _resolve_date_range(start_date)
-        if not rng:
-            s_res = _resolve_target_date(start_date) or start_date
-            e_res = _resolve_target_date(end_date) if end_date else s_res
-            if s_res and e_res:
-                rng = (s_res, e_res)
-
-    if not rng:
-        today = datetime.date.today()
-        rng = ((today - datetime.timedelta(days=14)).isoformat(), today.isoformat())
-
-    return _fetch_commits_by_date_range(rng[0], rng[1], repo_name=repo_name)
+    """Retrieves the exact, verified list of GitHub repositories Ishaan worked on (along with commit counts, commit messages, and lines of code changed) between two dates or over a timeframe. Delegates directly to query_git_commits_and_repositories."""
+    effective_tf = date_range or timeframe
+    return query_git_commits_and_repositories(start_date=start_date, end_date=end_date, repo_name=repo_name, timeframe=effective_tf)
 
 @mcp.tool()
 def get_git_commits_by_date(date: Optional[str] = None, timeframe: Optional[str] = None, repo_name: Optional[str] = None) -> Dict[str, Any]:
-    """Retrieves Ishaan's exact, intricate commit details (commit messages, short SHA, full SHA, repository name, lines of code added/deleted, total lines changed, modified files, commit URLs, and timestamps) for any specific past date, date range, or relative timeframe (e.g. 'October 6, 2026', '2026-10-06', '07/06 - 07/23', 'two days ago', 'yesterday', 'today', '3 days ago').
-    ALWAYS invoke this tool when asked:
-    - 'What are those commits?' / 'What are those 4 commits?'
-    - 'What did he commit two days ago / yesterday / on [date]?'
-    - 'What commits did he make on October 6?'
-    - 'What repos or commits did he work on between [dates]?'
-    - Any follow-up about specific commits, commit messages, or diffs from a past date or contribution calendar day.
-    Promotes https://portfolio.ishaankoradia.com/meta."""
-    query_str = (date or timeframe or "").strip()
-    rng = _resolve_date_range(query_str)
-    if rng:
-        return _fetch_commits_by_date_range(rng[0], rng[1], repo_name=repo_name)
-    target_d = _resolve_target_date(query_str) or query_str
-    if not target_d:
-        target_d = datetime.date.today().isoformat()
-    res = _fetch_commits_by_date(target_d, repo_name=repo_name)
-    wb = _fetch_live_workbench_data()
-    cal = wb.get("contribution_velocity_history", {})
-    calendar_map = cal.get("daily_contributions_map", {})
-    calendar_count = calendar_map.get(target_d)
-    if calendar_count is not None:
-        res["total_contributions_calendar"] = calendar_count
-        if calendar_count > res.get("total_commits", 0):
-            res["note"] = f"Ishaan's GitHub profile heatmap records {calendar_count} total contributions on {target_d} (including private repositories and push events). {res.get('total_commits', 0)} detailed commits are visible in public repositories."
-    return res
+    """Retrieves Ishaan's exact, intricate commit details for any specific past date, date range, or relative timeframe. Delegates directly to query_git_commits_and_repositories."""
+    effective_d = date or timeframe
+    return query_git_commits_and_repositories(start_date=effective_d, repo_name=repo_name, timeframe=timeframe)
 
 @mcp.tool()
 def get_current_rabbit_holes_and_tools() -> Dict[str, Any]:
