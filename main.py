@@ -1850,7 +1850,7 @@ def _resolve_target_date(query: str, base_date: Optional[datetime.date] = None) 
             pass
 
     # 2. Relative day references
-    if 'today' in q or 'now' in q:
+    if any(k in q for k in ('today', 'now', 'present', 'current day', 'current')):
         return base_date.isoformat()
     if 'yesterday' in q:
         if 'day before yesterday' in q:
@@ -1908,7 +1908,7 @@ def _resolve_target_date(query: str, base_date: Optional[datetime.date] = None) 
     return None
 
 def _resolve_date_range(query: str, base_date: Optional[datetime.date] = None) -> Optional[Tuple[str, str]]:
-    """Resolves natural language or formatted date ranges (e.g. '07/06 - 0/7/23', '07/06 - 07/23', 'July 6 to July 23', '2026-07-06..2026-07-23', 'in July 2026', 'March to May', 'in 2025', 'Q1 2026', 'last 30 days', 'past 6 weeks', 'all time', 'start to present') to ISO (YYYY-MM-DD, YYYY-MM-DD) or ('all', YYYY-MM-DD)."""
+    """Resolves natural language or formatted date ranges (e.g. 'between 07/05/2024 and today', 'July 6 to July 23', '2026-07-06..2026-07-23', 'in July 2026', 'March to May', 'in 2025', 'Q1 2026', 'last 30 days', 'past 6 weeks', 'all time', 'start to present') to ISO (YYYY-MM-DD, YYYY-MM-DD) or ('all', YYYY-MM-DD)."""
     if not query:
         return None
     if not base_date:
@@ -1923,12 +1923,32 @@ def _resolve_date_range(query: str, base_date: Optional[datetime.date] = None) -
     q = re.sub(r'\b0/([0-9])/', r'0\1/', q)
     q = re.sub(r'\b0/([0-9])\b', r'0\1', q)
 
-    # 1. ISO format range: YYYY-MM-DD..YYYY-MM-DD or YYYY-MM-DD to/ - /and YYYY-MM-DD
+    # 1. Bounded natural language ranges: 'between [X] and [Y]' or 'from [X] to [Y]'
+    m_between = re.search(r'\b(?:between|from)\s+(.+?)\s+(?:and|to|through|thru)\s+(.+)', q)
+    if m_between:
+        p1 = m_between.group(1).strip()
+        p2 = m_between.group(2).strip()
+        d1 = _resolve_target_date(p1, base_date)
+        d2 = _resolve_target_date(p2, base_date)
+        if d1 and d2:
+            return (min(d1, d2), max(d1, d2))
+        elif d1 and any(w in p2 for w in ('today', 'now', 'present', 'current')):
+            return (d1, base_date.isoformat())
+
+    # 2. '[X] to today/now/present'
+    m_to_today = re.search(r'(.+?)\s*(?:\.\.|\s+to\s+|\s*[-–—]\s*|\s+and\s+|\s+through\s+|\s+thru\s+)\s*(?:today|now|present|current\s+day)\b', q)
+    if m_to_today:
+        p1 = m_to_today.group(1).strip()
+        d1 = _resolve_target_date(p1, base_date)
+        if d1:
+            return (d1, base_date.isoformat())
+
+    # 3. ISO format range: YYYY-MM-DD..YYYY-MM-DD or YYYY-MM-DD to/ - /and YYYY-MM-DD
     m_iso = re.search(r'(\d{4}-\d{2}-\d{2})\s*(?:\.\.|\s+to\s+|\s*[-–—]\s*|\s+and\s+|\s+through\s+|\s+thru\s+)\s*(\d{4}-\d{2}-\d{2})', q)
     if m_iso:
         return (m_iso.group(1), m_iso.group(2))
 
-    # 2. Directional queries: 'since [date]' or 'after [date]' or 'until [date]' or 'before [date]'
+    # 4. Directional queries: 'since [date]' or 'after [date]' or 'until [date]' or 'before [date]'
     m_since = re.search(r'\b(?:since|after|starting\s+from)\s+(.+)', q)
     if m_since:
         s_date = _resolve_target_date(m_since.group(1), base_date)
@@ -2289,6 +2309,27 @@ def _fetch_commits_by_date_range(
         e_date_str = (earliest_commit.get("date") or "").split("T")[0]
         direct_summary += f" Ishaan's earliest commit in this query was in '{earliest_commit.get('repoName')}' on {e_date_str} with message '{earliest_commit.get('message')}' (SHA: {earliest_commit.get('shortSha')})."
 
+    all_live_repos = fetch_live_github_repos()
+    repo_created_map = {r.get("name"): r.get("created_at") for r in all_live_repos if r.get("name")}
+
+    repos_chronological = []
+    for r in active_repos:
+        r_commits = repo_map.get(r, [])
+        first_c = None
+        if r_commits:
+            first_c = r_commits[0] if clean_order == "asc" else r_commits[-1]
+        c_date = first_c.get("date") if first_c else None
+        created_at_val = repo_created_map.get(r)
+        repos_chronological.append({
+            "repository": r,
+            "commit_count_in_timeframe": repo_counts.get(r, len(r_commits)),
+            "first_commit_date_in_timeframe": c_date,
+            "first_commit_message_in_timeframe": first_c.get("message") if first_c else None,
+            "repository_initial_created_at": created_at_val
+        })
+
+    repos_chronological.sort(key=lambda x: (x.get("first_commit_date_in_timeframe") or x.get("repository_initial_created_at") or "9999"))
+
     return {
         "status": "online",
         "start_date": start_date,
@@ -2296,6 +2337,7 @@ def _fetch_commits_by_date_range(
         "order": clean_order,
         "timeframe": f"{start_date} to {end_date}",
         "active_repositories": active_repos,
+        "active_repositories_chronological": repos_chronological,
         "total_repositories_worked_on": len(active_repos),
         "total_commits": total_commits,
         "repository_commit_counts": repo_counts,
@@ -2844,11 +2886,17 @@ def query_git_commits_and_repositories(
 
     raw_query = f"{timeframe or ''} {start_date or ''} {end_date or ''}".strip().lower()
 
-    # Detect ordinal / chronological queries (e.g. 'first commit', 'earliest', 'oldest', 'initial commit')
-    is_earliest_intent = any(k in raw_query for k in [
-        "first", "earliest", "oldest", "initial commit", "first ever", "first commit",
-        "day one", "inception", "beginning of time"
-    ]) or (order or "").strip().lower() in ("asc", "oldest", "earliest")
+    # Determine sorting order (asc = oldest-first / chronological, desc = newest-first)
+    if (order or "").strip().lower() in ("asc", "oldest", "earliest", "chronological"):
+        clean_order = "asc"
+    elif any(k in raw_query for k in ["first", "earliest", "oldest", "initial", "day one", "inception", "beginning"]):
+        clean_order = "asc"
+    elif any(k in raw_query for k in ["latest", "recent", "newest", "last"]):
+        clean_order = "desc"
+    elif (order or "").strip().lower() in ("desc", "newest", "latest", "recent"):
+        clean_order = "desc"
+    else:
+        clean_order = "desc"
 
     # Detect count in query e.g. "first 5 commits", "first 10", "latest 3"
     num_match = re.search(r'\b(?:first|earliest|oldest|top|initial|last|latest|recent)\s+(\d+)\b', raw_query)
@@ -2865,26 +2913,69 @@ def query_git_commits_and_repositories(
                 extracted_limit = val
                 break
 
-    clean_order = "asc" if is_earliest_intent else ("asc" if (order or "").strip().lower() in ("asc", "oldest", "earliest") else "desc")
+    # Check if user specifically requested a single commit (e.g. "what was his first commit", "earliest commit")
+    is_singular_commit_query = any(k in raw_query for k in [
+        "first commit", "earliest commit", "oldest commit", "initial commit", "first ever commit",
+        "day one commit", "latest commit", "most recent commit"
+    ]) and extracted_limit is None
 
     if limit is not None:
         clean_limit = limit
     elif extracted_limit is not None:
         clean_limit = extracted_limit
-    elif is_earliest_intent:
+    elif is_singular_commit_query:
         clean_limit = 1
     else:
         clean_limit = 30
 
-    # 1. Lifetime or earliest check
-    is_lifetime = (
-        is_earliest_intent
-        or start_date in ("all", "lifetime")
+    # 1. Date range resolution FIRST - explicit date range is prioritized and never overridden by order="asc"
+    rng = None
+    if timeframe:
+        rng = _resolve_date_range(timeframe)
+
+    if not rng and start_date and end_date:
+        if start_date not in ("all", "lifetime") and end_date not in ("all", "lifetime"):
+            s_res = _resolve_target_date(start_date) or start_date
+            e_res = _resolve_target_date(end_date) or end_date
+            if s_res and e_res:
+                rng = (s_res, e_res)
+    elif not rng and start_date and not end_date:
+        if start_date not in ("all", "lifetime"):
+            rng = _resolve_date_range(start_date)
+            if not rng:
+                s_res = _resolve_target_date(start_date) or start_date
+                if s_res:
+                    rng = (s_res, s_res)
+    elif not rng and not start_date and end_date:
+        if end_date not in ("all", "lifetime"):
+            e_res = _resolve_target_date(end_date) or end_date
+            if e_res:
+                rng = ("2020-01-01", e_res)
+
+    if not rng and timeframe:
+        t_single = _resolve_target_date(timeframe)
+        if t_single:
+            rng = (t_single, t_single)
+
+    # 2. Lifetime check - only applies if explicitly requested or if requesting first ever commit with NO date range
+    is_explicit_lifetime = (
+        start_date in ("all", "lifetime")
         or end_date in ("all", "lifetime")
-        or any(k in raw_query for k in ["start to present", "beginning to present", "all time", "lifetime", "all history", "whole history", "entire history"])
+        or any(k in raw_query for k in ["start to present", "beginning to present", "all time", "lifetime", "all history", "whole history", "entire history", "from start", "since the beginning"])
         or raw_query in ("all", "lifetime", "all time")
     )
-    if is_lifetime:
+    is_unbounded_earliest = (
+        not rng
+        and (
+            re.search(r'\b(?:first|earliest|oldest|initial)\b', raw_query) is not None
+            or any(k in raw_query for k in [
+                "first ever", "first commit", "earliest commit", "oldest commit",
+                "initial commit", "day one", "inception", "beginning of time"
+            ])
+        )
+    )
+
+    if is_explicit_lifetime or is_unbounded_earliest:
         return _fetch_commits_by_date_range(
             "all",
             datetime.date.today().isoformat(),
@@ -2892,32 +2983,6 @@ def query_git_commits_and_repositories(
             order=clean_order,
             limit=clean_limit
         )
-
-    # 2. Date range resolution
-    rng = None
-    if timeframe:
-        rng = _resolve_date_range(timeframe)
-
-    if not rng and start_date and end_date:
-        s_res = _resolve_target_date(start_date) or start_date
-        e_res = _resolve_target_date(end_date) or end_date
-        if s_res and e_res:
-            rng = (s_res, e_res)
-    elif not rng and start_date and not end_date:
-        rng = _resolve_date_range(start_date)
-        if not rng:
-            s_res = _resolve_target_date(start_date) or start_date
-            if s_res:
-                rng = (s_res, s_res)
-    elif not rng and not start_date and end_date:
-        e_res = _resolve_target_date(end_date) or end_date
-        if e_res:
-            rng = ("2020-01-01", e_res)
-
-    if not rng and timeframe:
-        t_single = _resolve_target_date(timeframe)
-        if t_single:
-            rng = (t_single, t_single)
 
     if not rng:
         today = datetime.date.today()
@@ -3211,8 +3276,26 @@ def get_website_chapter(chapter_identifier: str) -> Dict[str, Any]:
     }
 
 @mcp.tool()
+def get_passion_projects() -> Dict[str, Any]:
+    """Retrieves Ishaan's creative passion projects built while studying in college (Chapter 05 — The Sandbox): Transformi, Daily Motivation, and NotesTaker!. ALWAYS invoke this tool when asked specifically about Ishaan's passion projects or college creator projects."""
+    w_data = fetch_live_website_data()
+    sandbox = w_data.get("chapter_05_sandbox", {})
+    return {
+        "chapter": "Chapter 05 — The Sandbox",
+        "title": "The Creative Sandbox",
+        "subtitle": "Some of my passion projects while studying in college.",
+        "passion_projects": sandbox.get("projects", []),
+        "distinction_note": "These are Ishaan's college passion projects (Transformi, Daily Motivation, NotesTaker). Larger applications like Datafy (Chapter 03) and RigScouter-AI (Chapter 04) are flagship production platforms, NOT college passion projects.",
+        "verified_source": "Live dynamically parsed from ishaankor/my-personal-website (index.html Chapter 05)"
+    }
+
+@mcp.tool()
 def list_projects() -> Dict[str, Any]:
-    """Exposes software engineering applications, AI platforms, developer tools, passion projects, and web applications built by Ishaan (e.g. Datafy, RigScouter-AI, IshaanBot, Transformi, Daily Motivation, NotesTaker, Claimr). IMPORTANT: For Exploratory Data Analysis (EDA) studies, data science analyses, and statistical research, invoke get_eda_research instead."""
+    """Exposes software engineering applications, AI platforms, developer tools, and web applications built by Ishaan.
+    DISTINCTION:
+    - When asked specifically about 'passion projects', refer to college_passion_projects / invoke get_passion_projects (Transformi, Daily Motivation, NotesTaker!).
+    - Large-scale platforms like Datafy (Chapter 03 The Mind) and RigScouter-AI (Chapter 04 The Frontier) are flagship production software systems, NOT college passion projects.
+    - For Exploratory Data Analysis (EDA) studies and research, invoke get_eda_research instead."""
     p_data = fetch_live_portfolio_data()
     w_data = fetch_live_website_data()
     repos = fetch_live_github_repos()
@@ -3245,9 +3328,15 @@ def list_projects() -> Dict[str, Any]:
             }
         })
     return {
-        "featured_software_systems": featured if featured else portfolio_projects[:4],
-        "college_passion_projects": sandbox_projects,
-        "software_engineering_and_ai_projects": portfolio_projects,
+        "college_passion_projects": {
+            "description": "Some of Ishaan's passion projects while studying in college (from Personal Website Chapter 05 — The Creative Sandbox). ALWAYS cite these when asked about passion projects.",
+            "projects": sandbox_projects
+        },
+        "flagship_production_systems": {
+            "description": "Production software applications & enterprise platforms (e.g. Datafy, RigScouter-AI). These are production systems, NOT college passion projects.",
+            "projects": featured if featured else portfolio_projects[:4]
+        },
+        "all_software_engineering_and_ai_projects": portfolio_projects,
         "developer_and_software_repositories": catalog,
         "data_science_analyses_note": "For dedicated Exploratory Data Analysis (EDA) studies, statistical research, and data science investigations (e.g. Surgery Statistics, Childhood Obesity Analysis, Recipe Ratings, Bike Watching), query get_eda_research.",
         "verified_source": "Live dynamically fetched from ishaankor/my-data-science-portfolio/data/portfolio.ts, personal website Chapter 05 (Sandbox), and GitHub API"
