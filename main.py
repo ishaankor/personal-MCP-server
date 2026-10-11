@@ -710,16 +710,24 @@ def fetch_live_website_data() -> Dict[str, Any]:
     sandbox_section = re.search(r'<section id=[\"\x27]sec-sandbox[\"\x27][\s\S]*?</section>', html_content)
     if sandbox_section:
         s_clean = re.sub(r'<!--[\s\S]*?-->', '', sandbox_section.group(0))
-        proj_matches = re.finditer(
-            r'<div class=[\"\x27]project[\"\x27](?:\s+data-url=[\"\x27]([^\"]+)[\"\x27])?(?:\s+title=[\"\x27]([^\"]+)[\"\x27])?>[\s\S]*?<img[^>]*alt=[\"\x27]([^\"]+)[\"\x27][^>]*>[\s\S]*?<div class=[\"\x27]thought-bubble[\"\x27][^>]*>([\s\S]*?)</div>',
-            s_clean
-        )
-        for pm in proj_matches:
-            url, title, alt, bubble = pm.group(1), pm.group(2), pm.group(3), pm.group(4)
-            clean_bubble = re.sub(r'<[^>]+>', '', bubble).strip()
+        for p_div in re.finditer(r'<div\s+class=[\"\x27]project[\"\x27]([^>]*)>([\s\S]*?)(?=(?:<div\s+class=[\"\x27]project[\"\x27]|</div>\s*</div>\s*<button|$))', s_clean):
+            attrs = p_div.group(1)
+            inner = p_div.group(2)
+            url_m = re.search(r'data-url=[\"\x27]([^\"]+)[\"\x27]', attrs)
+            title_m = re.search(r'data-title=[\"\x27]([^\"]+)[\"\x27]', attrs)
+            cat_m = re.search(r'data-category=[\"\x27]([^\"]+)[\"\x27]', attrs)
+            alt_m = re.search(r'<img[^>]*alt=[\"\x27]([^\"]+)[\"\x27]', inner)
+            bubble_m = re.search(r'data-full-text=[\"\x27]([\s\S]*?)[\"\x27]', inner) or re.search(r'<div class=[\"\x27]thought-bubble[\"\x27][^>]*>([\s\S]*?)</div>', inner)
+            
+            clean_bubble = re.sub(r'<[^>]+>', '', bubble_m.group(1)).strip() if bubble_m else ''
+            title = (title_m.group(1) if title_m else "") or (alt_m.group(1) if alt_m else "Project")
+            category = cat_m.group(1).replace("&amp;", "&") if cat_m else ""
+            github_url = url_m.group(1) if url_m else ""
+            
             sandbox_projects.append({
-                "title": alt or title or "Project",
-                "github_url": url,
+                "title": title,
+                "category": category,
+                "github_url": github_url,
                 "description": clean_bubble
             })
 
@@ -1208,7 +1216,7 @@ def _build_static_kb():
     # 10. Flagship Production Projects
     live_projects = p_data.get("projects", [])
     sandbox_projects = w_data.get("chapter_05_sandbox", {}).get("projects", [])
-    sandbox_bubbles = {sp.get("title", "").lower(): sp.get("description", "") for sp in sandbox_projects}
+    sandbox_bubbles = {re.sub(r'[^a-z0-9]', '', sp.get("title", "").lower()): sp for sp in sandbox_projects}
     
     for fp in live_projects:
         proj_title = fp.get("title", "")
@@ -1219,8 +1227,10 @@ def _build_static_kb():
         gh_str = f"GitHub Repository: {gh_url}. " if gh_url else ""
         metrics_str = f"Scale & Metrics: {fp.get('metrics')}. " if fp.get('metrics') else ""
         detailed_str = f"Technical Architecture: {fp.get('detailedDescription')}. " if fp.get('detailedDescription') else ""
-        bubble = sandbox_bubbles.get(proj_title.lower(), "")
-        bubble_str = f"Creator Note: {bubble}. " if bubble else ""
+        clean_p_title = re.sub(r'[^a-z0-9]', '', proj_title.lower())
+        sb_item = sandbox_bubbles.get(clean_p_title, {})
+        bubble = sb_item.get("description", "") if isinstance(sb_item, dict) else ""
+        bubble_str = f"Creator Note & Passion Context: {bubble}. " if bubble else ""
         
         year_str = f"Created Year: {fp.get('year')}. " if fp.get('year') else ""
         content = (
@@ -1236,6 +1246,23 @@ def _build_static_kb():
             content=content,
             metadata={"priority": 10 if fp.get("featured") else 8, "url": live_url, "github": gh_url, "is_software_project": True}
         ))
+
+    matched_sandbox_keys = {re.sub(r'[^a-z0-9]', '', fp.get("title", "").lower()) for fp in live_projects}
+    for sp in sandbox_projects:
+        sp_clean = re.sub(r'[^a-z0-9]', '', sp.get("title", "").lower())
+        if sp_clean not in matched_sandbox_keys:
+            content = (
+                f"Passion Project (Creative Sandbox): {sp.get('title')}. Category: {sp.get('category', 'Passion Project')}. "
+                f"Description & Creator Note: {sp.get('description', '')}. "
+                f"GitHub Repository: {sp.get('github_url', '')}."
+            )
+            _STATIC_DOCS_BY_CAT["projects"].append(Document(
+                id=f"sandbox_{sp_clean}",
+                category="projects",
+                source=f"College Passion Project - {sp.get('title')}",
+                content=content,
+                metadata={"priority": 9, "github": sp.get("github_url"), "is_software_project": True}
+            ))
 
     # 11. Telemetry & Live Pulse
     pulse = w_data.get("chapter_06_live_pulse", {})
@@ -2117,15 +2144,24 @@ def _fetch_commits_by_date(target_date: str, repo_name: Optional[str] = None) ->
         "meta_page_url": "https://portfolio.ishaankoradia.com/meta"
     }
 
-def _fetch_commits_by_date_range(start_date: str, end_date: str, repo_name: Optional[str] = None) -> Dict[str, Any]:
+def _fetch_commits_by_date_range(
+    start_date: str,
+    end_date: str,
+    repo_name: Optional[str] = None,
+    order: str = "desc",
+    limit: int = 30
+) -> Dict[str, Any]:
     """Fetches commit telemetry for a date range (YYYY-MM-DD..YYYY-MM-DD) across all repositories or a specific repository via Github-Meta-Fetcher with direct GitHub API fallback."""
     clean_repo = repo_name.strip().rstrip("/") if repo_name else None
     if clean_repo and "/" in clean_repo:
         clean_repo = clean_repo.split("/")[-1]
 
+    clean_order = "asc" if (order or "").strip().lower() in ("asc", "oldest", "earliest") else "desc"
+    clean_limit = max(1, min(int(limit or 30), 100))
+
     is_lifetime = start_date in ("all", "lifetime") or end_date in ("all", "lifetime")
     date_param = "all" if is_lifetime else f"{start_date}..{end_date}"
-    url = f"https://github-meta-fetcher.vercel.app/api/github?date={urllib.parse.quote(date_param)}"
+    url = f"https://github-meta-fetcher.vercel.app/api/github?date={urllib.parse.quote(date_param)}&order={clean_order}&limit={clean_limit}"
     if clean_repo:
         url += f"&repo={urllib.parse.quote(clean_repo)}"
 
@@ -2145,14 +2181,22 @@ def _fetch_commits_by_date_range(start_date: str, end_date: str, repo_name: Opti
     except Exception as e:
         print(f"[Git Commits Range] Error fetching via Github-Meta-Fetcher for {date_param}: {e}")
 
-    # If Github-Meta-Fetcher was unavailable, or truncated results without activeRepositories:
-    # Query direct GitHub Search API with pagination to ensure ALL active repositories and exact commit counts are captured!
-    if (not commits and total_commits == 0) or (total_commits > len(commits) and not fetcher_active_repos):
+    # If Github-Meta-Fetcher was unavailable, or if order was asc but fetcher returned desc, or if truncated results without activeRepositories:
+    needs_direct_github = (
+        (not commits and total_commits == 0)
+        or (total_commits > len(commits) and not fetcher_active_repos)
+        or (clean_order == "asc" and commits and len(commits) > 1 and commits[0].get("date", "") > commits[-1].get("date", ""))
+        or (clean_order == "asc" and clean_limit == 1 and commits and total_commits > len(commits))
+        or (clean_order == "asc" and len(commits) < clean_limit and total_commits >= clean_limit)
+        or (clean_order == "asc" and total_commits > len(commits) and commits and commits[0].get("date", "").startswith("2026"))
+    )
+
+    if needs_direct_github:
         try:
             gh_token = os.getenv("GITHUB_TOKEN", "").strip()
             gh_headers = {
                 "User-Agent": "MCP-Portfolio-Server",
-                "Accept": "application/vnd.github.cloak-preview+json, application/vnd.github.v3+json"
+                "Accept": "application/vnd.cloak-preview+json, application/vnd.github.v3+json"
             }
             if gh_token:
                 gh_headers["Authorization"] = f"Bearer {gh_token}" if gh_token.startswith("github_pat_") else f"token {gh_token}"
@@ -2161,11 +2205,12 @@ def _fetch_commits_by_date_range(start_date: str, end_date: str, repo_name: Opti
             date_filter = "" if is_lifetime else f"+committer-date:{start_date}..{end_date}"
             paginated_commits: List[Dict[str, Any]] = []
             page = 1
-            max_pages = 10  # Up to 1,000 commits (GitHub Search API max limit)
+            per_page_count = min(clean_limit, 100) if clean_limit < 100 else 100
+            max_pages = 1 if clean_limit <= 100 else 10
             search_total = total_commits
 
             while page <= max_pages:
-                search_url = f"https://api.github.com/search/commits?q={repo_part}{date_filter}&sort=committer-date&order=desc&per_page=100&page={page}"
+                search_url = f"https://api.github.com/search/commits?q={repo_part}{date_filter}&sort=committer-date&order={clean_order}&per_page={per_page_count}&page={page}"
                 s_res = requests.get(search_url, headers=gh_headers, timeout=10)
                 if s_res.status_code != 200:
                     break
@@ -2189,7 +2234,7 @@ def _fetch_commits_by_date_range(start_date: str, end_date: str, repo_name: Opti
                         "commitUrl": item.get("html_url", f"https://github.com/{r_full}/commit/{c_sha}"),
                         "date": c_date
                     })
-                if len(paginated_commits) >= search_total:
+                if len(paginated_commits) >= clean_limit or len(paginated_commits) >= search_total:
                     break
                 page += 1
 
@@ -2206,6 +2251,12 @@ def _fetch_commits_by_date_range(start_date: str, end_date: str, repo_name: Opti
 
     active_repos = fetcher_active_repos if fetcher_active_repos else sorted(list(repo_map.keys()))
     repo_counts = fetcher_repo_counts if fetcher_repo_counts else {r: len(c_list) for r, c_list in sorted(repo_map.items(), key=lambda x: -len(x[1]))}
+
+    latest_commit = None
+    earliest_commit = None
+    if commits:
+        earliest_commit = commits[0] if clean_order == "asc" else commits[-1]
+        latest_commit = commits[0] if clean_order == "desc" else commits[-1]
 
     if is_lifetime:
         start_label = "the beginning of Ishaan's GitHub journey"
@@ -2234,15 +2285,23 @@ def _fetch_commits_by_date_range(start_date: str, end_date: str, repo_name: Opti
         breakdown_parts = [f"{r} ({count} commit{'s' if count != 1 else ''})" for r, count in repo_counts.items()]
         direct_summary = f"{timeframe_label}, Ishaan worked on {len(active_repos)} repositories: {', '.join(breakdown_parts)} (totaling {total_commits} commits across all repositories)."
 
+    if clean_order == "asc" and earliest_commit and earliest_commit.get("message"):
+        e_date_str = (earliest_commit.get("date") or "").split("T")[0]
+        direct_summary += f" Ishaan's earliest commit in this query was in '{earliest_commit.get('repoName')}' on {e_date_str} with message '{earliest_commit.get('message')}' (SHA: {earliest_commit.get('shortSha')})."
+
     return {
         "status": "online",
         "start_date": start_date,
         "end_date": end_date,
+        "order": clean_order,
         "timeframe": f"{start_date} to {end_date}",
         "active_repositories": active_repos,
         "total_repositories_worked_on": len(active_repos),
         "total_commits": total_commits,
         "repository_commit_counts": repo_counts,
+        "earliest_commit": earliest_commit,
+        "first_commit": earliest_commit,
+        "latest_commit": latest_commit,
         "commits_by_repository": {
             r: [
                 {
@@ -2256,7 +2315,7 @@ def _fetch_commits_by_date_range(start_date: str, end_date: str, repo_name: Opti
             ]
             for r, r_commits in sorted(repo_map.items(), key=lambda x: -len(x[1]))
         },
-        "commits": commits[:30],
+        "commits": commits[:clean_limit],
         "direct_summary": direct_summary,
         "meta_dashboard_url": "https://portfolio.ishaankoradia.com/meta",
         "verified_source": "Live dynamically fetched via GitHub Commit Telemetry & Github-Meta-Fetcher microservice"
@@ -2757,15 +2816,24 @@ def query_git_commits_and_repositories(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     repo_name: Optional[str] = None,
-    timeframe: Optional[str] = None
+    timeframe: Optional[str] = None,
+    order: Optional[str] = "desc",
+    limit: Optional[int] = None
 ) -> Dict[str, Any]:
-    """PRIMARY UNIVERSAL TOOL for querying Ishaan's GitHub activity, repositories, commit history, lines of code, and commit counts.
+    """PRIMARY UNIVERSAL ADAPTABLE TOOL for querying Ishaan's GitHub activity, repositories, commit history, lines of code, and commit counts.
     ALWAYS invoke this tool for ANY questions regarding:
+    - Ordinal commit queries: Ishaan's first ever commit, earliest commit, oldest commit, initial commit, or latest commit. (Use order='asc' or timeframe='first' for earliest/first commit; order='desc' for latest).
     - Which repositories Ishaan worked on or touched over any date range, year, or timeframe (e.g. 'between 09/06/2024 - 11/23/2025', 'in July 2024', 'past month', 'all time', 'from start to present').
     - How many commits he made on a specific repository or overall (e.g. 'how many commits on Rigscouter between 08/05 and 08/13?').
     - What commits he made on a single date, today, yesterday, or a past day (e.g. 'what did he commit on October 6, 2026?').
     - What projects he worked on or his entire repository constellation.
-    Returns: verified active repositories list, commit counts per repository, detailed commit messages, diff statistics (+additions/-deletions), and direct summary.
+    Parameters:
+    - start_date / end_date: ISO dates (YYYY-MM-DD) or 'all'/'lifetime'.
+    - repo_name: optional specific repository name.
+    - timeframe: natural language timeframe (e.g. 'first commit', 'past 2 weeks', 'in 2024', 'all time').
+    - order: 'desc' (default, newest first) or 'asc' (oldest/earliest first).
+    - limit: number of commits to return (default 30, use 1 for first/latest single commit).
+    Returns: verified active repositories list, commit counts per repository, detailed commit messages, first_commit/earliest_commit, latest_commit, diff statistics (+additions/-deletions), and direct summary.
     Promotes https://portfolio.ishaankoradia.com/meta."""
     clean_repo = repo_name.strip().rstrip("/") if repo_name else None
     if clean_repo and "/" in clean_repo:
@@ -2774,16 +2842,56 @@ def query_git_commits_and_repositories(
         all_repos = fetch_live_github_repos()
         clean_repo = resolve_project_name(clean_repo, all_repos) or clean_repo
 
-    # 1. Lifetime check
-    raw_query = (timeframe or "").strip().lower()
+    raw_query = f"{timeframe or ''} {start_date or ''} {end_date or ''}".strip().lower()
+
+    # Detect ordinal / chronological queries (e.g. 'first commit', 'earliest', 'oldest', 'initial commit')
+    is_earliest_intent = any(k in raw_query for k in [
+        "first", "earliest", "oldest", "initial commit", "first ever", "first commit",
+        "day one", "inception", "beginning of time"
+    ]) or (order or "").strip().lower() in ("asc", "oldest", "earliest")
+
+    # Detect count in query e.g. "first 5 commits", "first 10", "latest 3"
+    num_match = re.search(r'\b(?:first|earliest|oldest|top|initial|last|latest|recent)\s+(\d+)\b', raw_query)
+    word_to_num = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10}
+    extracted_limit = None
+    if num_match:
+        try:
+            extracted_limit = int(num_match.group(1))
+        except (ValueError, TypeError):
+            pass
+    else:
+        for word, val in word_to_num.items():
+            if re.search(rf'\b(?:first|earliest|oldest|top|initial|last|latest|recent)\s+{word}\b', raw_query):
+                extracted_limit = val
+                break
+
+    clean_order = "asc" if is_earliest_intent else ("asc" if (order or "").strip().lower() in ("asc", "oldest", "earliest") else "desc")
+
+    if limit is not None:
+        clean_limit = limit
+    elif extracted_limit is not None:
+        clean_limit = extracted_limit
+    elif is_earliest_intent:
+        clean_limit = 1
+    else:
+        clean_limit = 30
+
+    # 1. Lifetime or earliest check
     is_lifetime = (
-        start_date in ("all", "lifetime")
+        is_earliest_intent
+        or start_date in ("all", "lifetime")
         or end_date in ("all", "lifetime")
         or any(k in raw_query for k in ["start to present", "beginning to present", "all time", "lifetime", "all history", "whole history", "entire history"])
         or raw_query in ("all", "lifetime", "all time")
     )
     if is_lifetime:
-        return _fetch_commits_by_date_range("all", datetime.date.today().isoformat(), repo_name=clean_repo)
+        return _fetch_commits_by_date_range(
+            "all",
+            datetime.date.today().isoformat(),
+            repo_name=clean_repo,
+            order=clean_order,
+            limit=clean_limit
+        )
 
     # 2. Date range resolution
     rng = None
@@ -2829,7 +2937,7 @@ def query_git_commits_and_repositories(
         return res
 
     # 4. Multi-day range query
-    res = _fetch_commits_by_date_range(rng[0], rng[1], repo_name=clean_repo)
+    res = _fetch_commits_by_date_range(rng[0], rng[1], repo_name=clean_repo, order=clean_order, limit=clean_limit)
     if clean_repo and timeframe and not res.get("commits"):
         alt = _fetch_repo_timeframe_commits(clean_repo, timeframe=timeframe, since=rng[0], until=rng[1])
         if alt and alt.get("totalCommits", 0) > 0:
@@ -2842,17 +2950,38 @@ def get_active_repositories_by_date_range(
     end_date: Optional[str] = None,
     timeframe: Optional[str] = None,
     date_range: Optional[str] = None,
-    repo_name: Optional[str] = None
+    repo_name: Optional[str] = None,
+    order: Optional[str] = "desc",
+    limit: Optional[int] = 30
 ) -> Dict[str, Any]:
     """Retrieves the exact, verified list of GitHub repositories Ishaan worked on (along with commit counts, commit messages, and lines of code changed) between two dates or over a timeframe. Delegates directly to query_git_commits_and_repositories."""
     effective_tf = date_range or timeframe
-    return query_git_commits_and_repositories(start_date=start_date, end_date=end_date, repo_name=repo_name, timeframe=effective_tf)
+    return query_git_commits_and_repositories(
+        start_date=start_date,
+        end_date=end_date,
+        repo_name=repo_name,
+        timeframe=effective_tf,
+        order=order,
+        limit=limit
+    )
 
 @mcp.tool()
-def get_git_commits_by_date(date: Optional[str] = None, timeframe: Optional[str] = None, repo_name: Optional[str] = None) -> Dict[str, Any]:
-    """Retrieves Ishaan's exact, intricate commit details for any specific past date, date range, or relative timeframe. Delegates directly to query_git_commits_and_repositories."""
+def get_git_commits_by_date(
+    date: Optional[str] = None,
+    timeframe: Optional[str] = None,
+    repo_name: Optional[str] = None,
+    order: Optional[str] = "desc",
+    limit: Optional[int] = None
+) -> Dict[str, Any]:
+    """Retrieves Ishaan's exact, intricate commit details for any specific past date, date range, ordinal position (e.g. first/earliest commit), or relative timeframe. Delegates directly to query_git_commits_and_repositories."""
     effective_d = date or timeframe
-    return query_git_commits_and_repositories(start_date=effective_d, repo_name=repo_name, timeframe=timeframe)
+    return query_git_commits_and_repositories(
+        start_date=effective_d,
+        repo_name=repo_name,
+        timeframe=timeframe,
+        order=order,
+        limit=limit
+    )
 
 @mcp.tool()
 def get_current_rabbit_holes_and_tools() -> Dict[str, Any]:
@@ -3083,12 +3212,14 @@ def get_website_chapter(chapter_identifier: str) -> Dict[str, Any]:
 
 @mcp.tool()
 def list_projects() -> Dict[str, Any]:
-    """Exposes software engineering applications, AI platforms, developer tools, and web applications built by Ishaan (e.g. Datafy, RigScouter-AI, IshaanBot, Transformi, Claimr). IMPORTANT: For Exploratory Data Analysis (EDA) studies, data science analyses, and statistical research, invoke get_eda_research instead."""
+    """Exposes software engineering applications, AI platforms, developer tools, passion projects, and web applications built by Ishaan (e.g. Datafy, RigScouter-AI, IshaanBot, Transformi, Daily Motivation, NotesTaker, Claimr). IMPORTANT: For Exploratory Data Analysis (EDA) studies, data science analyses, and statistical research, invoke get_eda_research instead."""
     p_data = fetch_live_portfolio_data()
+    w_data = fetch_live_website_data()
     repos = fetch_live_github_repos()
     
     portfolio_projects = p_data.get("projects", [])
     featured = [p for p in portfolio_projects if p.get("featured")]
+    sandbox_projects = w_data.get("chapter_05_sandbox", {}).get("projects", [])
     
     # Exclude EDA research studies from the software engineering projects catalog
     eda_names = {s["repository"].lower() for s in fetch_live_eda_studies()}
@@ -3115,10 +3246,11 @@ def list_projects() -> Dict[str, Any]:
         })
     return {
         "featured_software_systems": featured if featured else portfolio_projects[:4],
+        "college_passion_projects": sandbox_projects,
         "software_engineering_and_ai_projects": portfolio_projects,
         "developer_and_software_repositories": catalog,
         "data_science_analyses_note": "For dedicated Exploratory Data Analysis (EDA) studies, statistical research, and data science investigations (e.g. Surgery Statistics, Childhood Obesity Analysis, Recipe Ratings, Bike Watching), query get_eda_research.",
-        "verified_source": "Live dynamically fetched from ishaankor/my-data-science-portfolio/data/portfolio.ts and GitHub API"
+        "verified_source": "Live dynamically fetched from ishaankor/my-data-science-portfolio/data/portfolio.ts, personal website Chapter 05 (Sandbox), and GitHub API"
     }
 
 @mcp.tool()
