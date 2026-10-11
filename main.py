@@ -2198,85 +2198,31 @@ def _fetch_commits_by_date_range(
                 total_commits = data.get("totalCommits", len(commits))
                 fetcher_active_repos = data.get("activeRepositories", [])
                 fetcher_repo_counts = data.get("repositoryCommitCounts", {})
+                fetcher_earliest = data.get("earliestCommit")
+                fetcher_latest = data.get("latestCommit")
+                fetcher_chronological = data.get("activeRepositoriesChronological", [])
     except Exception as e:
         print(f"[Git Commits Range] Error fetching via Github-Meta-Fetcher for {date_param}: {e}")
-
-    # If Github-Meta-Fetcher was unavailable, or if order was asc but fetcher returned desc, or if truncated results without activeRepositories:
-    needs_direct_github = (
-        (not commits and total_commits == 0)
-        or (total_commits > len(commits) and not fetcher_active_repos)
-        or (clean_order == "asc" and commits and len(commits) > 1 and commits[0].get("date", "") > commits[-1].get("date", ""))
-        or (clean_order == "asc" and clean_limit == 1 and commits and total_commits > len(commits))
-        or (clean_order == "asc" and len(commits) < clean_limit and total_commits >= clean_limit)
-        or (clean_order == "asc" and total_commits > len(commits) and commits and commits[0].get("date", "").startswith("2026"))
-    )
-
-    if needs_direct_github:
-        try:
-            gh_token = os.getenv("GITHUB_TOKEN", "").strip()
-            gh_headers = {
-                "User-Agent": "MCP-Portfolio-Server",
-                "Accept": "application/vnd.cloak-preview+json, application/vnd.github.v3+json"
-            }
-            if gh_token:
-                gh_headers["Authorization"] = f"Bearer {gh_token}" if gh_token.startswith("github_pat_") else f"token {gh_token}"
-            
-            repo_part = f"+repo:{GITHUB_USERNAME}/{clean_repo}" if clean_repo else f"+author:{GITHUB_USERNAME}"
-            date_filter = "" if is_lifetime else f"+committer-date:{start_date}..{end_date}"
-            paginated_commits: List[Dict[str, Any]] = []
-            page = 1
-            per_page_count = min(clean_limit, 100) if clean_limit < 100 else 100
-            max_pages = 1 if clean_limit <= 100 else 10
-            search_total = total_commits
-
-            while page <= max_pages:
-                search_url = f"https://api.github.com/search/commits?q={repo_part}{date_filter}&sort=committer-date&order={clean_order}&per_page={per_page_count}&page={page}"
-                s_res = requests.get(search_url, headers=gh_headers, timeout=10)
-                if s_res.status_code != 200:
-                    break
-                s_data = s_res.json()
-                search_total = s_data.get("total_count", search_total)
-                items = s_data.get("items", [])
-                if not items:
-                    break
-                for item in items:
-                    r_full = item.get("repository", {}).get("full_name", "")
-                    r_short = item.get("repository", {}).get("name", "") or (r_full.split("/")[-1] if "/" in r_full else r_full)
-                    c_msg = item.get("commit", {}).get("message", "").split("\n")[0]
-                    c_date = item.get("commit", {}).get("committer", {}).get("date") or item.get("commit", {}).get("author", {}).get("date")
-                    c_sha = item.get("sha", "")
-                    paginated_commits.append({
-                        "sha": c_sha,
-                        "shortSha": c_sha[:7],
-                        "message": c_msg,
-                        "repoName": r_short,
-                        "repoFullName": r_full,
-                        "commitUrl": item.get("html_url", f"https://github.com/{r_full}/commit/{c_sha}"),
-                        "date": c_date
-                    })
-                if len(paginated_commits) >= clean_limit or len(paginated_commits) >= search_total:
-                    break
-                page += 1
-
-            if paginated_commits:
-                commits = paginated_commits
-                total_commits = search_total
-        except Exception as e:
-            print(f"[Git Commits Range] GitHub fallback error: {e}")
 
     repo_map: Dict[str, List[Dict[str, Any]]] = {}
     for c in commits:
         r_name = c.get("repoName") or "Unknown"
         repo_map.setdefault(r_name, []).append(c)
 
+    if clean_order == "asc" and commits:
+        commits.sort(key=lambda c: c.get("date", ""))
+    elif clean_order == "desc" and commits:
+        commits.sort(key=lambda c: c.get("date", ""), reverse=True)
+
     active_repos = fetcher_active_repos if fetcher_active_repos else sorted(list(repo_map.keys()))
     repo_counts = fetcher_repo_counts if fetcher_repo_counts else {r: len(c_list) for r, c_list in sorted(repo_map.items(), key=lambda x: -len(x[1]))}
 
-    latest_commit = None
-    earliest_commit = None
     if commits:
         earliest_commit = commits[0] if clean_order == "asc" else commits[-1]
-        latest_commit = commits[0] if clean_order == "desc" else commits[-1]
+        latest_commit = commits[-1] if clean_order == "asc" else commits[0]
+    else:
+        earliest_commit = fetcher_earliest
+        latest_commit = fetcher_latest
 
     if is_lifetime:
         start_label = "the beginning of Ishaan's GitHub journey"
