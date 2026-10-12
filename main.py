@@ -9,7 +9,6 @@ import difflib
 import uuid
 import ssl
 import datetime
-import calendar
 import requests
 from dataclasses import dataclass, field
 from collections import Counter
@@ -123,6 +122,48 @@ def _fetch_remote_spotify_fallback() -> Optional[Dict[str, Any]]:
         print(f"[Spotify] Live fallback error: {e}")
     return None
 
+_GENRE_CACHE: Dict[str, str] = {}
+
+def _resolve_track_genre(track_name: str, artist_name: str) -> str:
+    """Dynamically resolves primary music genre for a track using iTunes catalog search, cached in memory."""
+    if not track_name and not artist_name:
+        return "Electronic"
+    key = f"{track_name}:{artist_name}".lower()
+    if key in _GENRE_CACHE:
+        return _GENRE_CACHE[key]
+    term = f"{track_name} {artist_name}".strip()
+    url = f"https://itunes.apple.com/search?term={urllib.parse.quote(term)}&entity=song&limit=1"
+    req = urllib.request.Request(url, headers={"User-Agent": "PersonalPortfolioBot/1.0"})
+    try:
+        ctx = _create_ssl_context()
+        with urllib.request.urlopen(req, context=ctx, timeout=3) as resp:
+            data = json.loads(resp.read().decode())
+            results = data.get("results", [])
+            if results:
+                g = results[0].get("primaryGenreName")
+                if g:
+                    _GENRE_CACHE[key] = g
+                    return g
+    except Exception:
+        pass
+    if artist_name:
+        url_art = f"https://itunes.apple.com/search?term={urllib.parse.quote(artist_name)}&entity=musicArtist&limit=1"
+        req_art = urllib.request.Request(url_art, headers={"User-Agent": "PersonalPortfolioBot/1.0"})
+        try:
+            ctx = _create_ssl_context()
+            with urllib.request.urlopen(req_art, context=ctx, timeout=3) as resp:
+                data = json.loads(resp.read().decode())
+                results = data.get("results", [])
+                if results:
+                    g = results[0].get("primaryGenreName")
+                    if g:
+                        _GENRE_CACHE[key] = g
+                        return g
+        except Exception:
+            pass
+    _GENRE_CACHE[key] = "Electronic"
+    return "Electronic"
+
 def get_spotify_playback() -> Dict[str, Any]:
     token = _get_spotify_access_token()
     ctx = _create_ssl_context()
@@ -143,15 +184,20 @@ def get_spotify_playback() -> Dict[str, Any]:
                             album = item.get("album", {})
                             images = album.get("images", [])
                             is_playing = data.get("is_playing", False)
+                            t_title = item.get("name")
+                            t_artist = ", ".join(a.get("name", "") for a in item.get("artists", []))
+                            current_genre = _resolve_track_genre(t_title, t_artist)
                             return {
                                 "isPlaying": is_playing,
                                 "recentlyPlayed": False,
                                 "context": "NOW PLAYING" if is_playing else "PAUSED",
-                                "title": item.get("name"),
-                                "artist": ", ".join(a.get("name", "") for a in item.get("artists", [])),
+                                "title": t_title,
+                                "artist": t_artist,
                                 "album": album.get("name", ""),
                                 "albumImageUrl": images[0].get("url") if images else None,
                                 "songUrl": item.get("external_urls", {}).get("spotify"),
+                                "primaryGenre": current_genre,
+                                "topGenres": [current_genre] if current_genre else [],
                                 "progressMs": data.get("progress_ms"),
                                 "durationMs": item.get("duration_ms"),
                                 "playedAt": None,
@@ -161,23 +207,57 @@ def get_spotify_playback() -> Dict[str, Any]:
         except Exception as e:
             print(f"[Spotify] Notice checking currently-playing: {e}")
             
-        # 2. Fallback to recently-played track
+        # 2. Fallback to recently-played track & dynamic top genre calculation across last 10 tracks
         try:
-            req = urllib.request.Request("https://api.spotify.com/v1/me/player/recently-played?limit=1", headers={
+            req = urllib.request.Request("https://api.spotify.com/v1/me/player/recently-played?limit=10", headers={
                 "Authorization": f"Bearer {token}"
             })
             with urllib.request.urlopen(req, context=ctx, timeout=6) as resp:
                 if resp.status == 200:
                     data = json.loads(resp.read().decode())
-                    items = data.get("items", [])
+                    items = data.get("items", [])[:10]
                     if items:
                         track = items[0].get("track", {})
                         album = track.get("album", {})
                         images = album.get("images", [])
+
+                        genres_list = []
+                        recent_tracks = []
+                        for it in items:
+                            tr = it.get("track", {})
+                            alb = tr.get("album", {})
+                            imgs = alb.get("images", [])
+                            t_title = tr.get("name", "")
+                            t_artist = ", ".join(a.get("name", "") for a in tr.get("artists", []))
+                            first_artist = tr.get("artists", [{}])[0].get("name", "") if tr.get("artists") else ""
+                            t_genre = _resolve_track_genre(t_title, first_artist) if t_title else "Music"
+                            if t_genre:
+                                genres_list.append(t_genre)
+                            recent_tracks.append({
+                                "title": t_title,
+                                "artist": t_artist,
+                                "album": alb.get("name", ""),
+                                "albumImageUrl": imgs[0].get("url") if imgs else None,
+                                "songUrl": tr.get("external_urls", {}).get("spotify"),
+                                "playedAt": it.get("played_at"),
+                                "genre": t_genre or "Music"
+                            })
+
+                        top_3_genres = []
+                        genre_breakdown = []
+                        if genres_list:
+                            c = Counter(genres_list)
+                            top_3_genres = [g for g, _ in c.most_common(3)]
+                            total_g = len(genres_list)
+                            genre_breakdown = [
+                                {"genre": g, "count": cnt, "percentage": round((cnt / total_g) * 100)}
+                                for g, cnt in c.most_common(3)
+                            ]
+
                         return {
                             "isPlaying": False,
                             "recentlyPlayed": True,
-                            "context": "RECENTLY PLAYED",
+                            "context": "RECENT ROTATION",
                             "title": track.get("name"),
                             "artist": ", ".join(a.get("name", "") for a in track.get("artists", [])),
                             "album": album.get("name", ""),
@@ -186,8 +266,13 @@ def get_spotify_playback() -> Dict[str, Any]:
                             "progressMs": None,
                             "durationMs": track.get("duration_ms"),
                             "playedAt": items[0].get("played_at"),
+                            "topGenres": top_3_genres,
+                            "genreBreakdown": genre_breakdown,
+                            "sampleCount": len(recent_tracks),
+                            "recentTracks": recent_tracks,
+                            "idleAudioMessage": f"Headphones idle — Live rotation vibes: {', '.join(top_3_genres)}" if top_3_genres else "Headphones idle",
                             "fetchedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                            "source": "Direct Spotify Web API (Recently Played)"
+                            "source": "Direct Spotify Web API (Recently Played & Live Dynamic Genres across last 10 tracks)"
                         }
         except Exception as e:
             print(f"[Spotify] Error fetching recently-played: {e}")
@@ -206,6 +291,8 @@ def get_spotify_playback() -> Dict[str, Any]:
         "album": None,
         "albumImageUrl": None,
         "songUrl": None,
+        "topGenres": [],
+        "genreBreakdown": [],
         "progressMs": None,
         "durationMs": None,
         "playedAt": None,
@@ -214,17 +301,6 @@ def get_spotify_playback() -> Dict[str, Any]:
         "message": "No active or recently played Spotify playback found."
     }
 
-@mcp.custom_route("/spotify", methods=["GET", "HEAD", "OPTIONS"])
-async def spotify_route(request: Request):
-    headers = {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
-        "Access-Control-Allow-Headers": "*"
-    }
-    if request.method == "OPTIONS":
-        return JSONResponse({}, headers=headers)
-    data = get_spotify_playback()
-    return JSONResponse(data, headers=headers)
 
 DATA_DIR = Path("./data")
 GITHUB_USERNAME = os.getenv("GITHUB_USERNAME", "ishaankor")
@@ -367,7 +443,7 @@ def fetch_live_github_repos() -> List[Dict]:
     if _REPO_API_CACHE and (current_time - _REPO_API_CACHE_TIME < CACHE_TTL):
         return _REPO_API_CACHE
         
-    url = "https://github-meta-fetcher.vercel.app/api/github"
+    url = "https://personal-meta-fetcher.vercel.app/api/github"
     req = urllib.request.Request(url, headers={'User-Agent': 'MCP-Portfolio-Server'})
     try:
         ctx = _create_ssl_context()
@@ -539,6 +615,47 @@ def fetch_live_portfolio_site_structure() -> Dict[str, Any]:
         for m in re.finditer(r'import\s+([A-Z][a-zA-Z0-9]+)\s+from\s+[\'\"]\./([a-zA-Z0-9]+)[\'\"]', meta_dash_code):
             meta_subcomponents.append(m.group(1))
 
+    # Expand Projects tab subcomponents from components/projects/RepositoryMatrix.tsx
+    proj_matrix_code = _fetch_remote_github_file(repo, "components/projects/RepositoryMatrix.tsx")
+    proj_subcomponents = []
+    if proj_matrix_code:
+        for m in re.finditer(r'import\s+([A-Z][a-zA-Z0-9]+)\s+from\s+[\'\"]\./([a-zA-Z0-9]+)[\'\"]', proj_matrix_code):
+            proj_subcomponents.append(m.group(1))
+
+    # Parse dedicated EDA studies from components/projects/ExploratoryDataAnalysisShowcase.tsx
+    eda_showcase_code = _fetch_remote_github_file(repo, "components/projects/ExploratoryDataAnalysisShowcase.tsx")
+    eda_featured_studies = []
+    if eda_showcase_code:
+        m_eda = re.search(r'const\s+edaStudies:\s*AnalysisStudy\[\]\s*=\s*(\[[\s\S]*?\]);', eda_showcase_code)
+        if m_eda:
+            raw_arr = m_eda.group(1)
+            study_blocks = re.findall(r'\{([^{}]+(?:\{[^{}]*\}[^{}]*)*)\}', raw_arr)
+            for sb in study_blocks:
+                title_m = re.search(r'title:\s*[\'\"]([^\'\"]+)[\'\"]', sb)
+                year_m = re.search(r'year:\s*[\'\"]([^\'\"]+)[\'\"]', sb)
+                cat_m = re.search(r'category:\s*[\'\"]([^\'\"]+)[\'\"]', sb)
+                stat_m = re.search(r'statTag:\s*[\'\"]([^\'\"]+)[\'\"]', sb)
+                sum_m = re.search(r'summary:\s*[\'\"]([^\'\"]+)[\'\"]', sb)
+                high_m = re.search(r'highlight:\s*[\'\"]([^\'\"]+)[\'\"]', sb)
+                gh_m = re.search(r'githubUrl:\s*[\'\"]([^\'\"]+)[\'\"]', sb)
+                tags_raw = re.search(r'tags:\s*\[([^\]]+)\]', sb)
+                tags_m = re.findall(r'[\'\"]([^\'\"]+)[\'\"]', tags_raw.group(1)) if tags_raw else []
+                if title_m:
+                    eda_featured_studies.append({
+                        "title": title_m.group(1),
+                        "year": year_m.group(1) if year_m else "",
+                        "category": cat_m.group(1) if cat_m else "",
+                        "stat_tag": stat_m.group(1) if stat_m else "",
+                        "summary": sum_m.group(1) if sum_m else "",
+                        "highlight": high_m.group(1) if high_m else "",
+                        "github_url": gh_m.group(1) if gh_m else "",
+                        "tags": tags_m
+                    })
+
+    if "projects" in pages and proj_subcomponents:
+        pages["projects"]["subcomponents"] = proj_subcomponents
+        pages["projects"]["components"] = ["RepositoryMatrix"] + proj_subcomponents
+
     pkg_code = _fetch_remote_github_file(repo, "package.json")
     dependencies = {}
     if pkg_code:
@@ -548,7 +665,7 @@ def fetch_live_portfolio_site_structure() -> Dict[str, Any]:
         except Exception:
             pass
 
-    microservice_url = "https://github-meta-fetcher.vercel.app/api/github"
+    microservice_url = "https://personal-meta-fetcher.vercel.app/api/github"
     telemetry_status = {}
     try:
         t_req = urllib.request.Request(microservice_url, headers={"User-Agent": "MCP-Portfolio-Server"})
@@ -581,6 +698,36 @@ def fetch_live_portfolio_site_structure() -> Dict[str, Any]:
             "subcomponents": meta_subcomponents,
             "microservice_endpoint": microservice_url,
             "live_telemetry_snapshot": telemetry_status
+        },
+        "projects_tab_architecture": {
+            "route": "/projects",
+            "url": "https://portfolio.ishaankoradia.com/projects",
+            "page_title": pages.get("projects", {}).get("title", "Projects Library | Portfolio"),
+            "page_description": pages.get("projects", {}).get("description", ""),
+            "rendered_sections": [
+                {
+                    "section": "Projects Hero HUD",
+                    "component": "ProjectsHeroHUD",
+                    "description": "Interactive hero display showing total project counts, categories, and technology filters."
+                },
+                {
+                    "section": "Flagship Production Systems (Things I've Built, End to End)",
+                    "component": "ProjectsDeepDiveShowcase",
+                    "description": "Deep-dive showcases of flagship full-stack AI and software products: Datafy, RigScouter-AI, IshaanBot, and Portfolio."
+                },
+                {
+                    "section": "Exploratory Data Analysis (EDA) Subsection (Research & Statistical Modeling)",
+                    "component": "ExploratoryDataAnalysisShowcase",
+                    "description": "Empirical data science analyses, clinical analytics, and multivariate hypothesis testing studies.",
+                    "featured_eda_studies": eda_featured_studies
+                },
+                {
+                    "section": "Repository Timeline & Archive",
+                    "description": "Navigation link pointing to /meta for git activity timeline and GitHub profile archive."
+                }
+            ],
+            "subcomponents": proj_subcomponents,
+            "featured_eda_studies": eda_featured_studies
         },
         "dependencies": dependencies
     }
@@ -1810,321 +1957,20 @@ def _parse_contribution_calendar(cal: Dict[str, Any]) -> Dict[str, Any]:
         "meta_heatmap_url": "https://portfolio.ishaankoradia.com/meta"
     }
 
-MONTHS_MAP = {
-    'january': 1, 'jan': 1,
-    'february': 2, 'feb': 2,
-    'march': 3, 'mar': 3,
-    'april': 4, 'apr': 4,
-    'may': 5,
-    'june': 6, 'jun': 6,
-    'july': 7, 'jul': 7,
-    'august': 8, 'aug': 8,
-    'september': 9, 'sep': 9, 'sept': 9,
-    'october': 10, 'oct': 10,
-    'november': 11, 'nov': 11,
-    'december': 12, 'dec': 12
-}
-
-WORD_TO_NUM = {
-    'one': 1, 'a': 1, 'an': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5,
-    'six': 6, 'seven': 7, 'eight': 8, 'nine': 9, 'ten': 10,
-    'eleven': 11, 'twelve': 12, 'thirteen': 13, 'fourteen': 14,
-    'fifteen': 15, 'sixteen': 16, 'twenty': 20, 'thirty': 30,
-    'forty': 40, 'fifty': 50, 'sixty': 60, 'ninety': 90
-}
-
-def _resolve_target_date(query: str, base_date: Optional[datetime.date] = None) -> Optional[str]:
-    """Resolves natural language dates (e.g. 'two days ago', 'yesterday', 'today', 'October 6, 2026', '6th of October 2026', '2026-10-06', '07/06', '7/6') to ISO format YYYY-MM-DD."""
-    if not query:
-        return None
-    if not base_date:
-        base_date = datetime.date.today()
-    q = query.strip().lower()
-
-    # 1. Direct YYYY-MM-DD or YYYY/MM/DD or YYYY.MM.DD
-    m_iso = re.search(r'\b(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})\b', q)
-    if m_iso:
-        yr, mo, da = int(m_iso.group(1)), int(m_iso.group(2)), int(m_iso.group(3))
-        if 1 <= mo <= 12 and yr >= 1900:
-            max_days = calendar.monthrange(yr, mo)[1]
-            clamped_da = min(max(1, da), max_days)
-            return datetime.date(yr, mo, clamped_da).isoformat()
-
-    # 2. Relative day references
-    if any(k in q for k in ('today', 'now', 'present', 'current day', 'current')):
-        return base_date.isoformat()
-    if 'yesterday' in q:
-        if 'day before yesterday' in q:
-            return (base_date - datetime.timedelta(days=2)).isoformat()
-        return (base_date - datetime.timedelta(days=1)).isoformat()
-
-    m_days = re.search(r'(\w+|\d+)\s+days?\s+ago', q)
-    if m_days:
-        raw_val = m_days.group(1)
-        days_num = int(raw_val) if raw_val.isdigit() else WORD_TO_NUM.get(raw_val, 0)
-        if days_num > 0:
-            return (base_date - datetime.timedelta(days=days_num)).isoformat()
-
-    m_weeks = re.search(r'(\w+|\d+)\s+weeks?\s+ago', q)
-    if m_weeks:
-        raw_val = m_weeks.group(1)
-        w_num = int(raw_val) if raw_val.isdigit() else WORD_TO_NUM.get(raw_val, 0)
-        if w_num > 0:
-            return (base_date - datetime.timedelta(weeks=w_num)).isoformat()
-
-    # 3. Explicit Named Month Day (e.g. 'October 6, 2026', '6 October 2026', 'Oct 6', '6th of October 2026')
-    for m_name, m_num in sorted(MONTHS_MAP.items(), key=lambda x: -len(x[0])):
-        if re.search(rf'\b{m_name}\b', q):
-            # Pattern A: Month Day, Year or Month Day (e.g. October 6, 2026, Oct 6, October 6th)
-            m_a = re.search(rf'\b{m_name}\s+([1-9]|[12]\d|3[01])(?!\d)(?:st|nd|rd|th)?(?:\s*,?\s*(\d{{4}}|\d{{2}}))?\b', q)
-            if m_a:
-                day = int(m_a.group(1))
-                raw_yr = m_a.group(2)
-                yr = (int(raw_yr) if len(raw_yr) == 4 else 2000 + int(raw_yr)) if raw_yr else base_date.year
-                max_days = calendar.monthrange(yr, m_num)[1]
-                clamped_day = min(max(1, day), max_days)
-                return datetime.date(yr, m_num, clamped_day).isoformat()
-            # Pattern B: Day Month Year or Day Month (e.g. 6 October 2026, 6th of October)
-            m_b = re.search(rf'\b([1-9]|[12]\d|3[01])(?!\d)(?:st|nd|rd|th)?\s+(?:of\s+)?{m_name}(?:\s*,?\s*(\d{{4}}|\d{{2}}))?\b', q)
-            if m_b:
-                day = int(m_b.group(1))
-                raw_yr = m_b.group(2)
-                yr = (int(raw_yr) if len(raw_yr) == 4 else 2000 + int(raw_yr)) if raw_yr else base_date.year
-                max_days = calendar.monthrange(yr, m_num)[1]
-                clamped_day = min(max(1, day), max_days)
-                return datetime.date(yr, m_num, clamped_day).isoformat()
-
-    # 4. Numeric MM/DD/YYYY or MM/DD/YY or MM/DD
-    m_slash = re.search(r'\b(\d{1,2})/(\d{1,2})(?:/(?:20)?(\d{2,4}))?\b', q)
-    if m_slash:
-        m, d, y = m_slash.groups()
-        mo, da = int(m), int(d)
-        yr = int('20' + y) if y and len(y) <= 2 else (int(y) if y else base_date.year)
-        if 1 <= mo <= 12 and yr >= 1900:
-            max_days = calendar.monthrange(yr, mo)[1]
-            clamped_da = min(max(1, da), max_days)
-            return datetime.date(yr, mo, clamped_da).isoformat()
-
-    return None
-
-def _resolve_date_range(query: str, base_date: Optional[datetime.date] = None) -> Optional[Tuple[str, str]]:
-    """Resolves natural language or formatted date ranges to ISO (YYYY-MM-DD, YYYY-MM-DD) or ('all', YYYY-MM-DD)."""
-    if not query:
-        return None
-    if not base_date:
-        base_date = datetime.date.today()
-    q = query.strip().lower()
-
-    # Lifetime / complete account history
-    if any(k in q for k in ['start to present', 'beginning to present', 'all time', 'lifetime', 'all history', 'whole history', 'entire history', 'from start', 'since the beginning']) or q in ('all', 'lifetime', 'all time'):
-        return ('all', base_date.isoformat())
-
-    # Normalize common typos: '0/7/23' where '0/' precedes a single digit month before another slash
-    q = re.sub(r'\b0/([0-9])/', r'0\1/', q)
-    q = re.sub(r'\b0/([0-9])\b', r'0\1', q)
-
-    # 1. Bounded natural language ranges: 'between [X] and [Y]' or 'from [X] to [Y]'
-    m_between = re.search(r'\b(?:between|from)\s+(.+?)\s+(?:and|to|through|thru)\s+(.+)', q)
-    if m_between:
-        p1 = m_between.group(1).strip()
-        p2 = m_between.group(2).strip()
-        d1 = _resolve_target_date(p1, base_date)
-        d2 = _resolve_target_date(p2, base_date)
-        if d1 and d2:
-            return (min(d1, d2), max(d1, d2))
-        elif d1 and any(w in p2 for w in ('today', 'now', 'present', 'current')):
-            return (min(d1, base_date.isoformat()), max(d1, base_date.isoformat()))
-
-    # 2. '[X] to today/now/present'
-    m_to_today = re.search(r'(.+?)\s*(?:\.\.|\s+to\s+|\s*[-–—]\s*|\s+and\s+|\s+through\s+|\s+thru\s+)\s*(?:today|now|present|current\s+day)\b', q)
-    if m_to_today:
-        p1 = m_to_today.group(1).strip()
-        d1 = _resolve_target_date(p1, base_date)
-        if d1:
-            return (min(d1, base_date.isoformat()), max(d1, base_date.isoformat()))
-
-    # 3. ISO format range: YYYY-MM-DD..YYYY-MM-DD or YYYY-MM-DD to/ - /and YYYY-MM-DD
-    m_iso = re.search(r'(\d{4}-\d{2}-\d{2})\s*(?:\.\.|\s+to\s+|\s*[-–—]\s*|\s+and\s+|\s+through\s+|\s+thru\s+)\s*(\d{4}-\d{2}-\d{2})', q)
-    if m_iso:
-        d1, d2 = m_iso.group(1), m_iso.group(2)
-        return (min(d1, d2), max(d1, d2))
-
-    # 4. Directional queries: 'since [date]' or 'after [date]' or 'until [date]' or 'before [date]'
-    m_since = re.search(r'\b(?:since|after|starting\s+from)\s+(.+)', q)
-    if m_since:
-        s_date = _resolve_target_date(m_since.group(1), base_date)
-        if s_date:
-            if s_date > base_date.isoformat():
-                return (s_date, s_date)
-            return (s_date, base_date.isoformat())
-
-    m_until = re.search(r'\b(?:until|till|before|up\s+to|ending\s+at)\s+(.+)', q)
-    if m_until:
-        e_date = _resolve_target_date(m_until.group(1), base_date)
-        if e_date:
-            try:
-                dt_e = datetime.date.fromisoformat(e_date)
-                dt_s = dt_e - datetime.timedelta(days=365)
-                return (dt_s.isoformat(), e_date)
-            except Exception:
-                pass
-
-    # 3. Relative timeframes with arbitrary numbers
-    # Days (e.g. 'past 10 days', 'last 30 days', 'past 90 days')
-    m_rel_days = re.search(r'(?:last|past)\s+(\d+|\w+)\s+days?', q)
-    if m_rel_days:
-        val = m_rel_days.group(1)
-        n = int(val) if val.isdigit() else WORD_TO_NUM.get(val, 1)
-        return ((base_date - datetime.timedelta(days=n)).isoformat(), base_date.isoformat())
-
-    # Weeks (e.g. 'last 2 weeks', 'past 6 weeks', 'past 8 weeks')
-    m_rel_weeks = re.search(r'(?:last|past)\s+(\d+|\w+)\s+weeks?', q)
-    if m_rel_weeks:
-        val = m_rel_weeks.group(1)
-        n = int(val) if val.isdigit() else WORD_TO_NUM.get(val, 1)
-        return ((base_date - datetime.timedelta(days=n * 7)).isoformat(), base_date.isoformat())
-
-    # Months (e.g. 'past 3 months', 'last 6 months')
-    m_rel_months = re.search(r'(?:last|past)\s+(\d+|\w+)\s+months?', q)
-    if m_rel_months:
-        val = m_rel_months.group(1)
-        n = int(val) if val.isdigit() else WORD_TO_NUM.get(val, 1)
-        return ((base_date - datetime.timedelta(days=n * 30)).isoformat(), base_date.isoformat())
-
-    # Years (e.g. 'past 2 years')
-    m_rel_years = re.search(r'(?:last|past)\s+(\d+|\w+)\s+years?', q)
-    if m_rel_years:
-        val = m_rel_years.group(1)
-        n = int(val) if val.isdigit() else WORD_TO_NUM.get(val, 1)
-        return ((base_date - datetime.timedelta(days=n * 365)).isoformat(), base_date.isoformat())
-
-    # Specific named relative windows
-    if 'this week' in q or 'current week' in q:
-        idx = (base_date.weekday() + 1) % 7
-        d_start = base_date - datetime.timedelta(days=idx)
-        return (d_start.isoformat(), base_date.isoformat())
-    if 'last week' in q or 'previous week' in q:
-        idx = (base_date.weekday() + 1) % 7
-        d_end = base_date - datetime.timedelta(days=idx + 1)
-        d_start = d_end - datetime.timedelta(days=6)
-        return (d_start.isoformat(), d_end.isoformat())
-    if 'this month' in q or 'current month' in q:
-        d_start = datetime.date(base_date.year, base_date.month, 1)
-        return (d_start.isoformat(), base_date.isoformat())
-    if 'last month' in q or 'previous month' in q:
-        first_of_cur = datetime.date(base_date.year, base_date.month, 1)
-        last_of_prev = first_of_cur - datetime.timedelta(days=1)
-        first_of_prev = datetime.date(last_of_prev.year, last_of_prev.month, 1)
-        return (first_of_prev.isoformat(), last_of_prev.isoformat())
-    if 'this year' in q or 'current year' in q:
-        return (f'{base_date.year}-01-01', base_date.isoformat())
-    if 'last year' in q or 'previous year' in q:
-        py = base_date.year - 1
-        return (f'{py}-01-01', f'{py}-12-31')
-
-    # 4. Quarters: Q1, Q2, Q3, Q4 (e.g. Q1 2026, Q3, in Q4 2025)
-    m_q = re.search(r'\bq([1-4])\b(?:\s*(?:of\s+)?(\d{4}))?', q)
-    if m_q:
-        q_num = int(m_q.group(1))
-        q_yr = int(m_q.group(2)) if m_q.group(2) else base_date.year
-        q_starts = {1: (1, 1), 2: (4, 1), 3: (7, 1), 4: (10, 1)}
-        q_ends = {1: (3, 31), 2: (6, 30), 3: (9, 30), 4: (12, 31)}
-        sm, sd = q_starts[q_num]
-        em, ed = q_ends[q_num]
-        return (f'{q_yr}-{sm:02d}-{sd:02d}', f'{q_yr}-{em:02d}-{ed:02d}')
-
-    # 5. Slashes: MM/DD(/YYYY or /YY) to MM/DD(/YYYY or /YY)
-    m_slash = re.search(r'(\d{1,2})/(\d{1,2})(?:/(?:20)?(\d{2,4}))?\s*(?:\.\.|\s+to\s+|\s*[-–—]\s*|\s+and\s+|\s+through\s+|\s+thru\s+)\s*(\d{1,2})/(\d{1,2})(?:/(?:20)?(\d{2,4}))?', q)
-    if m_slash:
-        m1, d1, y1, m2, d2, y2 = m_slash.groups()
-        def parse_yr(y: Optional[str]) -> Optional[int]:
-            if not y:
-                return None
-            yi = int(y)
-            return 2000 + yi if yi < 100 else yi
-        yr1 = parse_yr(y1) or parse_yr(y2) or base_date.year
-        yr2 = parse_yr(y2) or yr1
-        try:
-            dt1 = datetime.date(yr1, int(m1), int(d1))
-            dt2 = datetime.date(yr2, int(m2), int(d2))
-            return (dt1.isoformat(), dt2.isoformat())
-        except ValueError:
-            pass
-
-    # 6. Month-Day to Month-Day ranges (e.g. July 6 to July 23, July 6 - July 23, Jul 6 - Jul 23, 6 July to 23 July)
-    month_names_pattern = '|'.join(sorted(MONTHS_MAP.keys(), key=lambda x: -len(x)))
-    m_word_range = re.search(
-        rf'({month_names_pattern})\s*(\d{{1,2}})(?:st|nd|rd|th)?(?:\s*,?\s*(\d{{4}}|\d{{2}}))?\s*(?:\.\.|\s+to\s+|\s*[-–—]\s*|\s+and\s+|\s+through\s+|\s+thru\s+)\s*(?:({month_names_pattern})\s*)?(\d{{1,2}})(?:st|nd|rd|th)?(?:\s*,?\s*(\d{{4}}|\d{{2}}))?',
-        q
-    )
-    if m_word_range:
-        mon1_str, d1, y1, mon2_str, d2, y2 = m_word_range.groups()
-        mon1 = MONTHS_MAP.get(mon1_str)
-        mon2 = MONTHS_MAP.get(mon2_str) if mon2_str else mon1
-        if mon1 and mon2:
-            def parse_yr_w(y: Optional[str]) -> Optional[int]:
-                if not y:
-                    return None
-                yi = int(y)
-                return 2000 + yi if yi < 100 else yi
-            yr1 = parse_yr_w(y1) or parse_yr_w(y2) or base_date.year
-            yr2 = parse_yr_w(y2) or yr1
-            try:
-                dt1 = datetime.date(yr1, mon1, int(d1))
-                dt2 = datetime.date(yr2, mon2, int(d2))
-                return (dt1.isoformat(), dt2.isoformat())
-            except ValueError:
-                pass
-
-    # 7. Month-to-Month ranges without specific days (e.g. 'March to May 2026', 'between January and March', 'June through August')
-    m_m2m = re.search(
-        rf'\b(?:from|between)?\s*({month_names_pattern})\s*(?:\s*,?\s*(\d{{4}}))?\s*(?:\.\.|\s+to\s+|\s*[-–—]\s*|\s+and\s+|\s+through\s+|\s+thru\s+)\s*({month_names_pattern})(?:\s*,?\s*(\d{{4}}))?\b',
-        q
-    )
-    if m_m2m:
-        m1_name, y1_str, m2_name, y2_str = m_m2m.groups()
-        mon1 = MONTHS_MAP.get(m1_name)
-        mon2 = MONTHS_MAP.get(m2_name)
-        if mon1 and mon2:
-            yr1 = int(y1_str) if y1_str else (int(y2_str) if y2_str else base_date.year)
-            yr2 = int(y2_str) if y2_str else yr1
-            _, last_day2 = calendar.monthrange(yr2, mon2)
-            return (f'{yr1}-{mon1:02d}-01', f'{yr2}-{mon2:02d}-{last_day2:02d}')
-
-    # 8. Single full-month queries for ANY of the 12 months (e.g. 'in July', 'in July 2026', 'during March 2025', 'in November')
-    for m_name, m_num in sorted(MONTHS_MAP.items(), key=lambda x: -len(x[0])):
-        m_single = re.search(rf'\b(?:in|during|for|throughout|all\s+of)?\s*{m_name}\b(?:\s*,?\s*(\d{{4}}))?', q)
-        if m_single and not re.search(rf'\b{m_name}\s+\d{{1,2}}\b', q) and not re.search(rf'\b\d{{1,2}}(?:st|nd|rd|th)?\s+(?:of\s+)?{m_name}\b', q):
-            yr = int(m_single.group(1)) if m_single.group(1) else base_date.year
-            _, last_day = calendar.monthrange(yr, m_num)
-            return (f'{yr}-{m_num:02d}-01', f'{yr}-{m_num:02d}-{last_day:02d}')
-
-    # 9. Single full-year queries (e.g. 'in 2025', 'during 2024', 'in 2026', '2024')
-    if not any(m in q for m in MONTHS_MAP) and not re.search(r'\d{1,4}[-/.]\d{1,2}', q) and not re.search(r'\d{1,2}[-/.]\d{1,4}', q):
-        m_year = re.search(r'\b(?:in|during|throughout|for|year)?\s*(20\d{2})\b', q)
-        if m_year:
-            yr = int(m_year.group(1))
-            return (f'{yr}-01-01', f'{yr}-12-31')
-
-    return None
-
 def _fetch_commits_by_date(target_date: str, repo_name: Optional[str] = None) -> Dict[str, Any]:
-    """Fetches intricate commit telemetry (messages, SHAs, repos, diff stats, modified files) for a specific date (YYYY-MM-DD) via Github-Meta-Fetcher with direct GitHub API fallback."""
+    """Fetches commit telemetry (messages, SHAs, repos, diff stats, modified files) for a specific date (YYYY-MM-DD) via Github-Meta-Fetcher."""
     clean_date = (target_date or "").strip()
     clean_repo = repo_name.strip().rstrip("/") if repo_name else None
     if clean_repo and "/" in clean_repo:
         clean_repo = clean_repo.split("/")[-1]
 
-    # Check if target_date is a date range
-    rng = _resolve_date_range(clean_date)
-    if rng:
-        return _fetch_commits_by_date_range(rng[0], rng[1], repo_name=clean_repo)
+    # If caller passed a date range formatted as start..end, delegate directly
+    if ".." in clean_date:
+        parts = clean_date.split("..", 1)
+        return _fetch_commits_by_date_range(parts[0].strip(), parts[1].strip(), repo_name=clean_repo)
 
-    ctx = _create_ssl_context()
-    
-    # 1. Primary: Github-Meta-Fetcher Vercel microservice
     try:
-        url = f"https://github-meta-fetcher.vercel.app/api/github?date={urllib.parse.quote(clean_date)}"
+        url = f"https://personal-meta-fetcher.vercel.app/api/github?date={urllib.parse.quote(clean_date)}"
         if clean_repo:
             url += f"&repo={urllib.parse.quote(clean_repo)}"
         res = requests.get(url, headers={"User-Agent": "MCP-Portfolio-Server"}, timeout=10)
@@ -2132,25 +1978,12 @@ def _fetch_commits_by_date(target_date: str, repo_name: Optional[str] = None) ->
             data = res.json()
             if data and data.get("status") == "online" and "commits" in data:
                 commits = data.get("commits", [])
-                summary_lines = []
-                for c in commits:
-                    sha = c.get("shortSha") or (c.get("sha", "")[:7])
-                    repo = c.get("repoName", "")
-                    msg = c.get("message", "")
-                    adds = c.get("additions", 0)
-                    dels = c.get("deletions", 0)
-                    raw_files = c.get("files", [])
-                    files = [f.get("filename") if isinstance(f, dict) else str(f) for f in raw_files]
-                    files_str = f" in {', '.join(files[:3])}" if files else ""
-                    summary_lines.append(f"- [{sha}] ({repo}) {msg} (+{adds}/-{dels} LOC{files_str})")
-                
                 return {
                     "status": "online",
                     "date": clean_date,
                     "repository": clean_repo,
                     "total_commits": data.get("totalCommits", len(commits)),
                     "commits": commits,
-                    "direct_summary": "\n".join(summary_lines) if summary_lines else f"No commits found on {clean_date}.",
                     "meta_page_url": "https://portfolio.ishaankoradia.com/meta",
                     "verified_source": "Live dynamically fetched via Github-Meta-Fetcher /api/github?date=..."
                 }
@@ -2163,97 +1996,8 @@ def _fetch_commits_by_date(target_date: str, repo_name: Optional[str] = None) ->
         "repository": clean_repo,
         "total_commits": 0,
         "commits": [],
-        "direct_summary": f"Could not retrieve commit records for {clean_date} via Github-Meta-Fetcher.",
         "meta_page_url": "https://portfolio.ishaankoradia.com/meta"
     }
-
-_LAST_QUERIED_DATE_RANGE: Optional[Tuple[str, str]] = None
-
-def _resolve_relative_offset(query: str, base_range: Optional[Tuple[str, str]]) -> Optional[Tuple[str, str]]:
-    """Resolves relative date offsets and partitioning against a previously queried date range.
-    Handles:
-    - 'starting from X days later' / 'starting X days after' / 'X days later'
-    - 'starting from X days earlier' / 'X days before'
-    - 'starting from X weeks later' / 'X weeks later'
-    - 'ending X days earlier' / 'until X days earlier'
-    - 'ending X days later'
-    - 'starting from [specific date]' / 'since [specific date]' (keeping base end date)
-    - 'ending on [specific date]' / 'until [specific date]' (keeping base start date)
-    """
-    if not base_range:
-        return None
-    try:
-        base_start = datetime.date.fromisoformat(base_range[0])
-        base_end = datetime.date.fromisoformat(base_range[1])
-    except Exception:
-        return None
-
-    q = (query or "").lower().strip()
-    w2n = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10}
-
-    # 1. Start date shifted later: e.g. "starting from 3 days later", "starting 3 days later", "3 days after"
-    m_start_days_later = re.search(r'\b(?:starting|beginning|start|since|from)?\s*(?:from\s+)?(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+days?\s+(?:later|after)\b', q)
-    if m_start_days_later:
-        val_str = m_start_days_later.group(1)
-        days = w2n.get(val_str, int(val_str) if val_str.isdigit() else 0)
-        new_start = base_start + datetime.timedelta(days=days)
-        return (new_start.isoformat(), base_end.isoformat())
-
-    # 2. Start date weeks later: e.g. "starting 1 week later", "2 weeks later"
-    m_start_weeks_later = re.search(r'\b(?:starting|beginning|start|since|from)?\s*(?:from\s+)?(\d+|one|two|three|four|five|six|seven|eight|nine|ten|a)\s+weeks?\s+(?:later|after)\b', q)
-    if m_start_weeks_later:
-        val_str = m_start_weeks_later.group(1)
-        weeks = 1 if val_str in ("a", "one") else w2n.get(val_str, int(val_str) if val_str.isdigit() else 1)
-        new_start = base_start + datetime.timedelta(weeks=weeks)
-        return (new_start.isoformat(), base_end.isoformat())
-
-    # 3. Explicit date partition for start date: e.g. "starting from October 1, 2025", "since 2025-09-01"
-    m_start_explicit_date = re.search(r'\b(?:starting|beginning|start|since|from)\s+(?:from\s+)?([A-Za-z]+\s+\d{1,2}(?:,?\s+\d{4})?|\d{4}-\d{2}-\d{2})\b', q)
-    if m_start_explicit_date:
-        parsed_d = _resolve_target_date(m_start_explicit_date.group(1))
-        if parsed_d:
-            return (parsed_d, base_end.isoformat())
-
-    # 4. Explicit date partition for end date: e.g. "ending on December 31, 2025", "until October 5, 2026"
-    m_end_explicit_date = re.search(r'\b(?:ending|until|to|through|up to)\s+(?:on\s+)?([A-Za-z]+\s+\d{1,2}(?:,?\s+\d{4})?|\d{4}-\d{2}-\d{2})\b', q)
-    if m_end_explicit_date:
-        parsed_d = _resolve_target_date(m_end_explicit_date.group(1))
-        if parsed_d:
-            return (base_start.isoformat(), parsed_d)
-
-    # 5. Start date shifted earlier (requires explicit start keyword)
-    m_start_days_earlier = re.search(r'\b(?:starting|beginning|start|since|from)\s+(?:from\s+)?(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+days?\s+(?:earlier|before|prior)\b', q)
-    if m_start_days_earlier:
-        val_str = m_start_days_earlier.group(1)
-        days = w2n.get(val_str, int(val_str) if val_str.isdigit() else 0)
-        new_start = base_start - datetime.timedelta(days=days)
-        return (new_start.isoformat(), base_end.isoformat())
-
-    # 6. Start date weeks earlier (requires explicit start keyword)
-    m_start_weeks_earlier = re.search(r'\b(?:starting|beginning|start|since|from)\s+(?:from\s+)?(\d+|one|two|three|four|five|six|seven|eight|nine|ten|a)\s+weeks?\s+(?:earlier|before|prior)\b', q)
-    if m_start_weeks_earlier:
-        val_str = m_start_weeks_earlier.group(1)
-        weeks = 1 if val_str in ("a", "one") else w2n.get(val_str, int(val_str) if val_str.isdigit() else 1)
-        new_start = base_start - datetime.timedelta(weeks=weeks)
-        return (new_start.isoformat(), base_end.isoformat())
-
-    # 7. End date shifted earlier: e.g. "ending 5 days earlier", "5 days earlier", "until 3 days before"
-    m_end_days_earlier = re.search(r'\b(?:ending|until|to|up to)?\s*(?:on\s+)?(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+days?\s+(?:earlier|before|prior)\b', q)
-    if m_end_days_earlier:
-        val_str = m_end_days_earlier.group(1)
-        days = w2n.get(val_str, int(val_str) if val_str.isdigit() else 0)
-        new_end = base_end - datetime.timedelta(days=days)
-        return (base_start.isoformat(), new_end.isoformat())
-
-    # 8. End date shifted later
-    m_end_days_later = re.search(r'\b(?:ending|until|to|up to)?\s*(?:on\s+)?(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+days?\s+(?:later|after)\b', q)
-    if m_end_days_later:
-        val_str = m_end_days_later.group(1)
-        days = w2n.get(val_str, int(val_str) if val_str.isdigit() else 0)
-        new_end = base_end + datetime.timedelta(days=days)
-        return (base_start.isoformat(), new_end.isoformat())
-
-    return None
 
 def _fetch_commits_by_date_range(
     start_date: str,
@@ -2263,7 +2007,6 @@ def _fetch_commits_by_date_range(
     limit: int = 30
 ) -> Dict[str, Any]:
     """Fetches commit telemetry for a date range (YYYY-MM-DD..YYYY-MM-DD) across all repositories or a specific repository via Github-Meta-Fetcher."""
-    global _LAST_QUERIED_DATE_RANGE
     clean_repo = repo_name.strip().rstrip("/") if repo_name else None
     if clean_repo and "/" in clean_repo:
         clean_repo = clean_repo.split("/")[-1]
@@ -2272,11 +2015,9 @@ def _fetch_commits_by_date_range(
     clean_limit = max(1, min(int(limit or 30), 100))
 
     is_lifetime = start_date in ("all", "lifetime") or end_date in ("all", "lifetime")
-    if not is_lifetime and start_date and end_date and start_date != end_date:
-        _LAST_QUERIED_DATE_RANGE = (start_date, end_date)
 
     date_param = "all" if is_lifetime else f"{start_date}..{end_date}"
-    url = f"https://github-meta-fetcher.vercel.app/api/github?date={urllib.parse.quote(date_param)}&order={clean_order}&limit={clean_limit}"
+    url = f"https://personal-meta-fetcher.vercel.app/api/github?date={urllib.parse.quote(date_param)}&order={clean_order}&limit={clean_limit}"
     if clean_repo:
         url += f"&repo={urllib.parse.quote(clean_repo)}"
 
@@ -2322,27 +2063,10 @@ def _fetch_commits_by_date_range(
     active_repos = fetcher_active_repos if fetcher_active_repos else sorted(list(repo_map.keys()))
     repo_counts = fetcher_repo_counts if fetcher_repo_counts else {r: len(c_list) for r, c_list in sorted(repo_map.items(), key=lambda x: -len(x[1]))}
 
-    if commits:
-        earliest_commit = commits[0] if clean_order == "asc" else commits[-1]
-        latest_commit = commits[-1] if clean_order == "asc" else commits[0]
-    else:
-        earliest_commit = fetcher_earliest
-        latest_commit = fetcher_latest
+    earliest_commit = fetcher_earliest or (commits[0] if commits and clean_order == "asc" else (commits[-1] if commits else None))
+    latest_commit = fetcher_latest or (commits[-1] if commits and clean_order == "asc" else (commits[0] if commits else None))
 
-    if is_lifetime:
-        start_label = "the beginning of Ishaan's GitHub journey"
-        end_label = "the present day"
-        timeframe_label = "Across his entire GitHub history"
-    else:
-        try:
-            dt_start = datetime.date.fromisoformat(start_date)
-            dt_end = datetime.date.fromisoformat(end_date)
-            start_label = dt_start.strftime("%B %-d, %Y")
-            end_label = dt_end.strftime("%B %-d, %Y")
-        except Exception:
-            start_label = start_date
-            end_label = end_date
-        timeframe_label = f"Between {start_label} and {end_label}"
+
 
     all_live_repos = fetch_live_github_repos()
     repo_created_map = {r.get("name"): r.get("created_at") for r in all_live_repos if r.get("name")}
@@ -2402,45 +2126,6 @@ def _fetch_commits_by_date_range(
     repos_by_latest_commit = sorted(repos_by_first_commit, key=lambda x: (x.get("latest_commit_date_in_timeframe") or "0000"), reverse=True)
     repos_by_activity = sorted(repos_by_first_commit, key=lambda x: x.get("commit_count_in_timeframe", 0), reverse=True)
 
-    summary_parts = []
-    if not active_repos or total_commits == 0:
-        summary_parts.append(f"{timeframe_label}, Ishaan did not make any commits on GitHub.")
-    elif len(active_repos) == 1:
-        r_name = active_repos[0]
-        r_commits = repo_map.get(r_name, [])
-        c_samples = ", ".join([f"'{c.get('message', '')}'" for c in r_commits[:3]])
-        c_desc = f": {c_samples}" if c_samples else ""
-        summary_parts.append(f"{timeframe_label}, Ishaan worked on 1 repository: {r_name} ({len(r_commits)} commit{'s' if len(r_commits) != 1 else ''}{c_desc}).")
-    else:
-        breakdown_parts = [f"{r.get('repository')} ({r.get('commit_count_in_timeframe')} commit{'s' if r.get('commit_count_in_timeframe') != 1 else ''})" for r in repos_by_activity]
-        summary_parts.append(f"{timeframe_label}, Ishaan worked on {len(active_repos)} repositories: {', '.join(breakdown_parts)} (totaling {total_commits} commits across all repositories).")
-
-    # Chronological sequence of first commits within this timeframe
-    first_chrono = [
-        f"{rc['repository']} ({rc['first_commit_date_in_timeframe'].split('T')[0] if rc.get('first_commit_date_in_timeframe') else 'N/A'})"
-        for rc in repos_by_first_commit if rc.get("first_commit_date_in_timeframe")
-    ]
-    if first_chrono:
-        summary_parts.append(f"Repositories in chronological order of their first commit within this timeframe: {', '.join(first_chrono)}.")
-
-    # Recency sequence of latest commits within this timeframe
-    latest_chrono = [
-        f"{rc['repository']} ({rc['latest_commit_date_in_timeframe'].split('T')[0] if rc.get('latest_commit_date_in_timeframe') else 'N/A'})"
-        for rc in repos_by_latest_commit if rc.get("latest_commit_date_in_timeframe")
-    ]
-    if latest_chrono:
-        summary_parts.append(f"Repositories in order of most recent commit within this timeframe: {', '.join(latest_chrono)}.")
-
-    if earliest_commit and earliest_commit.get("message") and earliest_commit.get("date"):
-        e_date_str = (earliest_commit.get("date") or "").split("T")[0]
-        summary_parts.append(f"Overall earliest commit in this timeframe was in '{earliest_commit.get('repoName')}' on {e_date_str} with message '{earliest_commit.get('message')}' ({earliest_commit.get('shortSha')}).")
-
-    if latest_commit and latest_commit.get("message") and latest_commit.get("date"):
-        l_date_str = (latest_commit.get("date") or "").split("T")[0]
-        summary_parts.append(f"Overall latest commit in this timeframe was in '{latest_commit.get('repoName')}' on {l_date_str} with message '{latest_commit.get('message')}' ({latest_commit.get('shortSha')}).")
-
-    direct_summary = " ".join(summary_parts)
-
     return {
         "status": "online",
         "start_date": start_date,
@@ -2472,190 +2157,15 @@ def _fetch_commits_by_date_range(
             for r, r_commits in sorted(repo_map.items(), key=lambda x: -len(x[1]))
         },
         "commits": commits[:clean_limit],
-        "direct_summary": direct_summary,
         "meta_dashboard_url": "https://portfolio.ishaankoradia.com/meta",
         "verified_source": "Live dynamically fetched via GitHub Commit Telemetry & Github-Meta-Fetcher microservice"
-    }
-
-def _parse_timeframe_query(timeframe: str, cal_summary: Dict[str, Any]) -> Dict[str, Any]:
-    """Resolves natural language queries for historical commit counts and specific date commits."""
-    t = (timeframe or "").strip().lower()
-    if not t:
-        return cal_summary
-
-    # 0. Check for date range first:
-    rng = _resolve_date_range(t)
-    if rng:
-        start_d, end_d = rng
-        range_res = _fetch_commits_by_date_range(start_d, end_d)
-        cal_map = cal_summary.get("daily_contributions_map", {})
-        total_calendar = 0
-        try:
-            d_curr = datetime.date.fromisoformat(start_d)
-            d_last = datetime.date.fromisoformat(end_d)
-            while d_curr <= d_last:
-                total_calendar += cal_map.get(d_curr.isoformat(), 0)
-                d_curr += datetime.timedelta(days=1)
-        except Exception:
-            total_calendar = 0
-
-        range_res["requested_timeframe"] = timeframe
-        range_res["total_contributions_calendar"] = total_calendar
-        public_commits_count = range_res.get("total_commits", 0)
-        repos_list = range_res.get("active_repositories", [])
-        repos_str = ", ".join(repos_list) if repos_list else "no public repositories"
-
-        if total_calendar > public_commits_count and public_commits_count > 0:
-            range_res["direct_answer"] = (
-                f"Between {start_d} and {end_d} ({timeframe}), Ishaan logged {total_calendar} contributions on his GitHub profile heatmap (including private repositories/events). "
-                f"{public_commits_count} of these are detailed commits across his public repositories ({repos_str})."
-            )
-        elif total_calendar > 0 and public_commits_count == 0:
-            range_res["direct_answer"] = (
-                f"Between {start_d} and {end_d} ({timeframe}), Ishaan logged {total_calendar} contributions on his GitHub profile heatmap (across private repositories/push events). No public repository commits were recorded in this timeframe."
-            )
-        elif public_commits_count > 0:
-            range_res["direct_answer"] = (
-                f"Between {start_d} and {end_d} ({timeframe}), Ishaan made {public_commits_count} commits across {repos_str}."
-            )
-        else:
-            range_res["direct_answer"] = f"Between {start_d} and {end_d} ({timeframe}), Ishaan did not make any commits on GitHub."
-
-        return range_res
-
-    # 1. Check for specific date or relative day reference:
-    # "two days ago", "yesterday", "today", "3 days ago", "October 6, 2026", etc.
-    resolved_d = _resolve_target_date(t)
-    if resolved_d:
-        calendar_map = cal_summary.get("daily_contributions_map", {})
-        calendar_count = calendar_map.get(resolved_d)
-        if calendar_count is None:
-            if resolved_d == cal_summary.get("yesterday", {}).get("date"):
-                calendar_count = cal_summary.get("yesterday", {}).get("contributions_count")
-            elif resolved_d == cal_summary.get("today", {}).get("date"):
-                calendar_count = cal_summary.get("today", {}).get("contributions_count")
-
-        date_data = _fetch_commits_by_date(resolved_d)
-        commits_list = date_data.get("commits", [])
-        total_public_commits = len(commits_list)
-        total_adds = sum(c.get("additions", 0) for c in commits_list)
-        total_dels = sum(c.get("deletions", 0) for c in commits_list)
-        public_repos = sorted(list(set(c.get("repoName", "") for c in commits_list if c.get("repoName"))))
-        repos_str = ", ".join(public_repos) if public_repos else "his repositories"
-
-        official_contributions = calendar_count if calendar_count is not None else total_public_commits
-
-        if official_contributions > total_public_commits and total_public_commits > 0:
-            direct_answer = (
-                f"On {resolved_d} ({timeframe}), Ishaan logged {official_contributions} contributions on his GitHub profile heatmap. "
-                f"{total_public_commits} of these are detailed commits across his public repositories ({repos_str}), "
-                f"totaling {total_adds:,} lines added and {total_dels:,} lines deleted, alongside contributions in private repositories."
-            )
-        elif total_public_commits > 0:
-            direct_answer = (
-                f"On {resolved_d} ({timeframe}), Ishaan made {total_public_commits} commits across {repos_str}, "
-                f"totaling {total_adds:,} lines added and {total_dels:,} lines deleted."
-            )
-        elif official_contributions > 0:
-            direct_answer = (
-                f"On {resolved_d} ({timeframe}), Ishaan logged {official_contributions} contributions on his GitHub profile heatmap."
-            )
-        else:
-            direct_answer = f"No contributions logged on {resolved_d} ({timeframe})."
-
-        return {
-            "requested_timeframe": timeframe,
-            "resolved_date": resolved_d,
-            "total_contributions_calendar": official_contributions,
-            "total_commits": official_contributions,
-            "public_commits_count": total_public_commits,
-            "commits": commits_list,
-            "lines_added": total_adds,
-            "lines_deleted": total_dels,
-            "public_repositories": public_repos,
-            "commit_summary": date_data.get("direct_summary"),
-            "direct_answer": direct_answer,
-            "meta_dashboard_url": "https://portfolio.ishaankoradia.com/meta",
-            "verified_source": "Live GitHub contribution calendar & Github-Meta-Fetcher"
-        }
-
-    # 2. Multi-week aggregations
-    if ("two" in t or "2" in t or "second" in t) and "week" in t:
-        wk = cal_summary.get("two_weeks_ago", {})
-        return {
-            "requested_timeframe": "two weeks ago",
-            "date_range": wk.get("date_range"),
-            "total_commits": wk.get("total_commits_or_contributions", 0),
-            "active_days": wk.get("active_coding_days", 0),
-            "daily_activity": wk.get("daily_activity", []),
-            "direct_answer": f"Two weeks ago ({wk.get('date_range')}), Ishaan made {wk.get('total_commits_or_contributions', 0)} commits/contributions across {wk.get('active_coding_days', 0)} active coding days."
-        }
-    elif "last week" in t or "1 week" in t or "one week" in t or "previous week" in t:
-        wk = cal_summary.get("last_week", {})
-        return {
-            "requested_timeframe": "last week",
-            "date_range": wk.get("date_range"),
-            "total_commits": wk.get("total_commits_or_contributions", 0),
-            "active_days": wk.get("active_coding_days", 0),
-            "daily_activity": wk.get("daily_activity", []),
-            "direct_answer": f"Last week ({wk.get('date_range')}), Ishaan made {wk.get('total_commits_or_contributions', 0)} commits/contributions across {wk.get('active_coding_days', 0)} active coding days."
-        }
-    elif "this week" in t or "current week" in t:
-        wk = cal_summary.get("this_week", {})
-        return {
-            "requested_timeframe": "this week",
-            "date_range": wk.get("date_range"),
-            "total_commits": wk.get("total_commits_or_contributions", 0),
-            "active_days": wk.get("active_coding_days", 0),
-            "daily_activity": wk.get("daily_activity", []),
-            "direct_answer": f"This week ({wk.get('date_range')}), Ishaan made {wk.get('total_commits_or_contributions', 0)} commits/contributions across {wk.get('active_coding_days', 0)} active coding days."
-        }
-    elif ("three" in t or "3" in t) and "week" in t:
-        wk = cal_summary.get("three_weeks_ago", {})
-        return {
-            "requested_timeframe": "three weeks ago",
-            "date_range": wk.get("date_range"),
-            "total_commits": wk.get("total_commits_or_contributions", 0),
-            "active_days": wk.get("active_coding_days", 0),
-            "daily_activity": wk.get("daily_activity", []),
-            "direct_answer": f"Three weeks ago ({wk.get('date_range')}), Ishaan made {wk.get('total_commits_or_contributions', 0)} commits/contributions across {wk.get('active_coding_days', 0)} active coding days."
-        }
-    elif ("four" in t or "4" in t) and ("week" in t or "month ago" in t):
-        wk = cal_summary.get("four_weeks_ago", {})
-        return {
-            "requested_timeframe": "four weeks ago",
-            "date_range": wk.get("date_range"),
-            "total_commits": wk.get("total_commits_or_contributions", 0),
-            "active_days": wk.get("active_coding_days", 0),
-            "daily_activity": wk.get("daily_activity", []),
-            "direct_answer": f"Four weeks ago ({wk.get('date_range')}), Ishaan made {wk.get('total_commits_or_contributions', 0)} commits/contributions across {wk.get('active_coding_days', 0)} active coding days."
-        }
-        
-    monthly = cal_summary.get("monthly_breakdown", {})
-    for m_name, m_num in sorted(MONTHS_MAP.items(), key=lambda x: -len(x[0])):
-        if m_name in t:
-            month_suffix = f"-{m_num:02d}"
-            for m_key, count in sorted(monthly.items(), reverse=True):
-                if m_key.endswith(month_suffix):
-                    return {
-                        "requested_timeframe": f"{m_name.capitalize()} ({m_key})",
-                        "total_commits": count,
-                        "direct_answer": f"In {m_name.capitalize()} ({m_key}), Ishaan made {count} commits/contributions on GitHub."
-                    }
-
-    return {
-        "requested_timeframe": timeframe,
-        "weekly_summary": cal_summary.get("weekly_summary_history", []),
-        "monthly_breakdown": monthly,
-        "total_contributions_past_year": cal_summary.get("total_contributions_past_year", 0),
-        "direct_answer": f"Ishaan has logged {cal_summary.get('total_contributions_past_year', 0)} contributions in the past year. See live weekly breakdown on https://portfolio.ishaankoradia.com/meta"
     }
 
 def _fetch_live_workbench_data() -> Dict[str, Any]:
     """Fetches real-time GitHub commit stream, line diff statistics, and active workbench telemetry from Github-Meta-Fetcher."""
     try:
         req = urllib.request.Request(
-            "https://github-meta-fetcher.vercel.app/api/github",
+            "https://personal-meta-fetcher.vercel.app/api/github",
             headers={"User-Agent": "MCP-Portfolio-Server"}
         )
         ctx = _create_ssl_context()
@@ -2761,7 +2271,7 @@ def _fetch_repo_commit_telemetry(repo_name: str) -> Optional[Dict[str, Any]]:
         if "/" in clean_repo:
             clean_repo = clean_repo.split("/")[-1]
             
-        fetcher_base = os.getenv("GITHUB_META_FETCHER_URL", "https://github-meta-fetcher.vercel.app/api/github")
+        fetcher_base = os.getenv("GITHUB_META_FETCHER_URL", "https://personal-meta-fetcher.vercel.app/api/github")
         fetcher_url = f"{fetcher_base}?repo={urllib.parse.quote(clean_repo)}"
         req = urllib.request.Request(fetcher_url, headers={"User-Agent": "MCP-Portfolio-Server"})
         ctx = _create_ssl_context()
@@ -2773,63 +2283,24 @@ def _fetch_repo_commit_telemetry(repo_name: str) -> Optional[Dict[str, Any]]:
         print(f"Error proxying repo commit telemetry for {repo_name} through Github-Meta-Fetcher: {e}")
     return None
 
-def _fetch_repo_timeframe_commits(repo_name: str, timeframe: Optional[str] = None, since: Optional[str] = None, until: Optional[str] = None) -> Dict[str, Any]:
-    """Fetches exact repository commit activity and diffs over a relative timeframe or date range strictly by proxying through Github-Meta-Fetcher. Never invokes GitHub API directly."""
+def _fetch_repo_timeframe_commits(
+    repo_name: str,
+    since: Optional[str] = None,
+    until: Optional[str] = None
+) -> Dict[str, Any]:
+    """Fetches exact repository commit activity and diffs for a repository strictly by proxying through Github-Meta-Fetcher. Never invokes GitHub API directly."""
     try:
         clean_repo = repo_name.strip().rstrip("/")
         if "/" in clean_repo:
             clean_repo = clean_repo.split("/")[-1]
             
         params = {"repo": clean_repo}
-        if timeframe:
-            params["timeframe"] = timeframe
-            if not since:
-                rng = _resolve_date_range(timeframe)
-                if rng:
-                    since = rng[0]
-                    until = rng[1]
-                else:
-                    target_d = _resolve_target_date(timeframe)
-                    if target_d:
-                        params["date"] = target_d
-                    else:
-                        tf_lower = timeframe.lower().strip()
-                        word_to_num = {
-                            'one': 1, 'a': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5,
-                            'six': 6, 'seven': 7, 'eight': 8, 'nine': 9, 'ten': 10, 'eleven': 11, 'twelve': 12
-                        }
-                        m_match = re.search(r'(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s*months?', tf_lower)
-                        w_match = re.search(r'(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s*weeks?', tf_lower)
-                        d_match = re.search(r'(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s*days?', tf_lower)
-                        y_match = re.search(r'(\d+|one|two)\s*years?', tf_lower)
-                        
-                        now_dt = datetime.datetime.now(datetime.timezone.utc)
-                        if m_match:
-                            val = m_match.group(1)
-                            count = int(val) if val.isdigit() else word_to_num.get(val, 1)
-                            since_dt = now_dt - datetime.timedelta(days=int(count * 30.5))
-                            params["since"] = since_dt.strftime("%Y-%m-%d")
-                        elif w_match:
-                            val = w_match.group(1)
-                            count = int(val) if val.isdigit() else word_to_num.get(val, 1)
-                            since_dt = now_dt - datetime.timedelta(days=count * 7)
-                            params["since"] = since_dt.strftime("%Y-%m-%d")
-                        elif d_match:
-                            val = d_match.group(1)
-                            count = int(val) if val.isdigit() else word_to_num.get(val, 1)
-                            since_dt = now_dt - datetime.timedelta(days=count)
-                            params["since"] = since_dt.strftime("%Y-%m-%d")
-                        elif y_match:
-                            val = y_match.group(1)
-                            count = int(val) if val.isdigit() else word_to_num.get(val, 1)
-                            since_dt = now_dt - datetime.timedelta(days=count * 365)
-                            params["since"] = since_dt.strftime("%Y-%m-%d")
         if since:
             params["since"] = since
         if until:
             params["until"] = until
             
-        fetcher_base = os.getenv("GITHUB_META_FETCHER_URL", "https://github-meta-fetcher.vercel.app/api/github")
+        fetcher_base = os.getenv("GITHUB_META_FETCHER_URL", "https://personal-meta-fetcher.vercel.app/api/github")
         fetcher_url = f"{fetcher_base}?{urllib.parse.urlencode(params)}"
         req = urllib.request.Request(fetcher_url, headers={"User-Agent": "MCP-Portfolio-Server"})
         ctx = _create_ssl_context()
@@ -2847,20 +2318,29 @@ def _fetch_repo_timeframe_commits(repo_name: str, timeframe: Optional[str] = Non
         }
 
 @mcp.tool()
-def get_repo_commit_activity(repo_name: str, timeframe: Optional[str] = None, since: Optional[str] = None, until: Optional[str] = None) -> Dict[str, Any]:
-    """Retrieves Ishaan's exact commit count, commit messages, code diffs (+additions/-deletions), and commit history for a specific repository (e.g. Datafy, RigScouter-AI, my-personal-website, my-data-science-portfolio) over any timeframe (e.g. 'last two weeks', 'this week', 'past month', 'yesterday') or date range.
-    ALWAYS invoke this tool when asked:
-    - How many commits Ishaan did on a specific repository or project over a timeframe (e.g. 'how many commits did he do on Datafy in the last two weeks?').
-    - What commits were made to a specific repository in the last two weeks / past month / this week.
-    - Follow-up details on commits for a particular repository over any time window.
-    Proxies strictly through Github-Meta-Fetcher and promotes https://portfolio.ishaankoradia.com/meta."""
+def get_repo_commit_activity(
+    repo_name: str,
+    since: Optional[str] = None,
+    until: Optional[str] = None
+) -> Dict[str, Any]:
+    """Retrieves Ishaan's exact commit count, commit messages, code diffs (+additions/-deletions), and commit history for a specific repository (e.g. Datafy, RigScouter-AI, my-personal-website, my-data-science-portfolio) over an explicit ISO date range.
+    Parameters:
+    - repo_name: Name of the repository (e.g. 'Datafy', 'RigScouter-AI').
+    - since: Optional ISO start date (YYYY-MM-DD).
+    - until: Optional ISO end date (YYYY-MM-DD).
+    The AI brain computes the ISO dates and interprets the returned commit records and statistics. Proxies strictly through Github-Meta-Fetcher and promotes https://portfolio.ishaankoradia.com/meta."""
     all_repos = fetch_live_github_repos()
     target_repo = resolve_project_name(repo_name, all_repos) or repo_name
-    return _fetch_repo_timeframe_commits(target_repo, timeframe=timeframe, since=since, until=until)
+    return _fetch_repo_timeframe_commits(target_repo, since=since, until=until)
 
 @mcp.tool()
-def get_git_telemetry(repo_name: Optional[str] = None, timeframe: Optional[str] = None, date: Optional[str] = None) -> Dict[str, Any]:
-    """Retrieves Ishaan's complete Git telemetry, lines of code (LOC) changed, commit diff statistics, active repositories, historical commit velocity, and intricate commit details for specific dates (e.g. 'two days ago', 'October 6, 2026', 'yesterday', 'this week', total contributions). You can pass a specific repo_name (e.g. 'my-data-science-portfolio', 'data science portfolio', 'my-personal-website', 'RigScouter-AI'), timeframe, or date. ALWAYS invoke this tool when asked how many commits Ishaan did, what those commits were, his lines of code changed, latest commit, or historical Git activity, and promote https://portfolio.ishaankoradia.com/meta."""
+def get_git_telemetry(
+    repo_name: Optional[str] = None,
+    since: Optional[str] = None,
+    until: Optional[str] = None,
+    date: Optional[str] = None
+) -> Dict[str, Any]:
+    """Retrieves Ishaan's complete Git telemetry, lines of code (LOC) changed, commit diff statistics, active repositories, historical commit velocity, and commit details. Accepts optional repo_name, ISO date (YYYY-MM-DD), or ISO range (since/until). Promotes https://portfolio.ishaankoradia.com/meta."""
     target_repo = None
     if repo_name:
         all_repos = fetch_live_github_repos()
@@ -2899,29 +2379,16 @@ def get_git_telemetry(repo_name: Optional[str] = None, timeframe: Optional[str] 
             "meta_page_url": "https://portfolio.ishaankoradia.com/meta",
             "verified_source": f"Live dynamically proxied for {target_repo} via Github-Meta-Fetcher & /meta telemetry"
         }
-        if timeframe and not date:
-            res_repo["timeframe_commits"] = _fetch_repo_timeframe_commits(target_repo, timeframe=timeframe)
+        if since or until:
+            res_repo["range_commits"] = _fetch_repo_timeframe_commits(target_repo, since=since, until=until)
         elif date:
-            target_date_str = date
-            resolved = _resolve_target_date(target_date_str) or target_date_str
-            res_repo["commits_on_date"] = _fetch_commits_by_date(resolved, repo_name=target_repo)
-        elif timeframe and date:
-            res_repo["timeframe_commits"] = _fetch_repo_timeframe_commits(target_repo, timeframe=timeframe)
+            res_repo["commits_on_date"] = _fetch_commits_by_date(date, repo_name=target_repo)
         return res_repo
 
     wb = _fetch_live_workbench_data()
     latest = wb.get("latest_commit", {})
     meta = wb.get("meta_telemetry", {})
     cal_summary = wb.get("contribution_velocity_history", {})
-
-    timeframe_res = None
-    if timeframe:
-        timeframe_res = _parse_timeframe_query(timeframe, cal_summary)
-
-    date_commits = None
-    if date:
-        resolved = _resolve_target_date(date) or date
-        date_commits = _fetch_commits_by_date(resolved)
 
     res = {
         "latest_commit": latest,
@@ -2938,31 +2405,31 @@ def get_git_telemetry(repo_name: Optional[str] = None, timeframe: Optional[str] 
         "this_week": cal_summary.get("this_week", {}),
         "total_contributions_past_year": cal_summary.get("total_contributions_past_year", 0),
         "monthly_commit_breakdown": cal_summary.get("monthly_breakdown", {}),
+        "daily_contributions_map": cal_summary.get("daily_contributions_map", {}),
         "meta_page_promotion": "Explore Ishaan's live Meta telemetry page at https://portfolio.ishaankoradia.com/meta for interactive LOC charts, Codebase Evolution, and Developer Habits Matrix.",
         "meta_page_url": "https://portfolio.ishaankoradia.com/meta",
         "verified_source": "Live dynamically fetched from Github-Meta-Fetcher microservice and portfolio /meta page"
     }
-    if timeframe_res:
-        res["timeframe_query"] = timeframe_res
-    if date_commits:
-        res["commits_on_date"] = date_commits
+    if date:
+        res["commits_on_date"] = _fetch_commits_by_date(date)
     return res
 
 @mcp.tool()
-def get_git_commit_velocity_and_history(timeframe: Optional[str] = None) -> Dict[str, Any]:
-    """Retrieves Ishaan's exact historical commit counts, weekly commit velocity, and contribution calendar breakdown (e.g. 'two weeks ago', 'last week', 'this week', 'today', 'yesterday', 'two days ago', 'this month', 'September', or total contributions for the year). When asked about a specific past date or day, it also returns the intricate list of commits for that day. ALWAYS invoke this tool when asked how many commits Ishaan made two weeks ago, last week, this week, on a specific date/month, or his overall commit velocity, and promote https://portfolio.ishaankoradia.com/meta."""
+def get_git_commit_velocity_and_history() -> Dict[str, Any]:
+    """Retrieves Ishaan's verified GitHub contribution velocity, active streaks, weekly commit aggregates (this week, last week, 2 weeks ago, 3 weeks ago, 4 weeks ago), daily contribution calendar, and monthly commit breakdown across the past year.
+    The AI brain inspects these structured contribution counts and calendar maps to synthesize accurate answers for weekly velocity, active coding days, and contribution trends. Promotes https://portfolio.ishaankoradia.com/meta."""
     wb = _fetch_live_workbench_data()
     cal_summary = wb.get("contribution_velocity_history", {})
-    timeframe_res = _parse_timeframe_query(timeframe, cal_summary) if timeframe else None
-    
     return {
         "total_contributions_past_year": cal_summary.get("total_contributions_past_year", 0),
-        "timeframe_query_result": timeframe_res,
-        "two_weeks_ago": cal_summary.get("two_weeks_ago", {}),
-        "last_week": cal_summary.get("last_week", {}),
         "this_week": cal_summary.get("this_week", {}),
+        "last_week": cal_summary.get("last_week", {}),
+        "two_weeks_ago": cal_summary.get("two_weeks_ago", {}),
+        "three_weeks_ago": cal_summary.get("three_weeks_ago", {}),
+        "four_weeks_ago": cal_summary.get("four_weeks_ago", {}),
         "weekly_commit_history": cal_summary.get("weekly_summary_history", []),
         "monthly_commits": cal_summary.get("monthly_breakdown", {}),
+        "daily_contributions_map": cal_summary.get("daily_contributions_map", {}),
         "meta_dashboard_url": "https://portfolio.ishaankoradia.com/meta",
         "verified_source": "Live dynamic GitHub contribution calendar parsed via Github-Meta-Fetcher"
     }
@@ -2972,24 +2439,29 @@ def query_git_commits_and_repositories(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     repo_name: Optional[str] = None,
-    timeframe: Optional[str] = None,
-    order: Optional[str] = "desc",
-    limit: Optional[int] = None
+    order: str = "desc",
+    limit: int = 30
 ) -> Dict[str, Any]:
-    """PRIMARY UNIVERSAL ADAPTABLE TOOL for querying Ishaan's GitHub activity, repositories, commit history, lines of code, and commit counts.
-    ALWAYS invoke this tool for ANY questions regarding:
-    - Ordinal commit queries: Ishaan's first ever commit, earliest commit, oldest commit, initial commit, or latest commit. (Use order='asc' or timeframe='first' for earliest/first commit; order='desc' for latest).
-    - Which repositories Ishaan worked on or touched over any date range, year, or timeframe (e.g. 'between 09/06/2024 - 11/23/2025', 'in July 2024', 'past month', 'all time', 'from start to present').
-    - How many commits he made on a specific repository or overall (e.g. 'how many commits on Rigscouter between 08/05 and 08/13?').
-    - What commits he made on a single date, today, yesterday, or a past day (e.g. 'what did he commit on October 6, 2026?').
-    - What projects he worked on or his entire repository constellation.
+    """Retrieves verified Git telemetry, commit records, repository activity, and chronological commit order across Ishaan's GitHub journey.
+    The AI model determines the time bounds and ordering, and this tool executes the deterministic query.
+    
     Parameters:
-    - start_date / end_date: ISO dates (YYYY-MM-DD) or 'all'/'lifetime'.
-    - repo_name: optional specific repository name.
-    - timeframe: natural language timeframe (e.g. 'first commit', 'past 2 weeks', 'in 2024', 'all time').
-    - order: 'desc' (default, newest first) or 'asc' (oldest/earliest first).
-    - limit: number of commits to return (default 30, use 1 for first/latest single commit).
-    Returns: verified active repositories list, commit counts per repository, detailed commit messages, first_commit/earliest_commit, latest_commit, diff statistics (+additions/-deletions), and direct summary.
+    - start_date: ISO date string ('YYYY-MM-DD') or 'all' / 'lifetime'. If querying a single day, pass the same date for start_date and end_date (or omit end_date).
+    - end_date: ISO date string ('YYYY-MM-DD') or 'all' / 'lifetime'.
+    - repo_name: optional specific repository name (e.g. 'Datafy', 'RigScouter-AI').
+    - order: 'asc' (chronological / oldest first) or 'desc' (newest first). Defaults to 'desc'.
+    - limit: maximum commits to return in the commits array (default 30). Pass 1 for single earliest/latest commit queries.
+    
+    Returns structured data primitives:
+    - total_commits: integer total commits across all repositories in the window.
+    - total_repositories_worked_on: count of active repositories.
+    - active_repositories: list of active repository names.
+    - repository_commit_counts: mapping of repository name to commit count.
+    - repositories_by_first_commit: array of repository objects sorted chronologically by first commit date in the timeframe (includes 'first_commit_date_in_timeframe', 'first_commit_message_in_timeframe', 'commit_count_in_timeframe').
+    - repositories_by_latest_commit: array sorted by most recent commit date.
+    - repositories_by_activity: array sorted by commit volume.
+    - earliest_commit / latest_commit: overall earliest and latest commit objects in the window.
+    - commits: list of individual commit records.
     Promotes https://portfolio.ishaankoradia.com/meta."""
     clean_repo = repo_name.strip().rstrip("/") if repo_name else None
     if clean_repo and "/" in clean_repo:
@@ -2998,199 +2470,51 @@ def query_git_commits_and_repositories(
         all_repos = fetch_live_github_repos()
         clean_repo = resolve_project_name(clean_repo, all_repos) or clean_repo
 
-    raw_query = f"{timeframe or ''} {start_date or ''} {end_date or ''}".strip().lower()
+    clean_order = "asc" if (order or "").strip().lower() in ("asc", "oldest", "earliest", "chronological") else "desc"
+    clean_limit = max(1, min(int(limit or 30), 100))
 
-    # Determine sorting order (asc = oldest-first / chronological, desc = newest-first)
-    if (order or "").strip().lower() in ("asc", "oldest", "earliest", "chronological"):
-        clean_order = "asc"
-    elif any(k in raw_query for k in ["first", "earliest", "oldest", "initial", "day one", "inception", "beginning"]):
-        clean_order = "asc"
-    elif any(k in raw_query for k in ["latest", "recent", "newest", "last"]):
-        clean_order = "desc"
-    elif (order or "").strip().lower() in ("desc", "newest", "latest", "recent"):
-        clean_order = "desc"
-    else:
-        clean_order = "desc"
+    today = datetime.date.today()
+    today_iso = today.isoformat()
 
-    # Detect count in query e.g. "first 5 commits", "first 10", "latest 3"
-    num_match = re.search(r'\b(?:first|earliest|oldest|top|initial|last|latest|recent)\s+(\d+)\b', raw_query)
-    word_to_num = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10}
-    extracted_limit = None
-    if num_match:
-        try:
-            extracted_limit = int(num_match.group(1))
-        except (ValueError, TypeError):
-            pass
-    else:
-        for word, val in word_to_num.items():
-            if re.search(rf'\b(?:first|earliest|oldest|top|initial|last|latest|recent)\s+{word}\b', raw_query):
-                extracted_limit = val
-                break
+    s_clean = (start_date or "").strip()
+    e_clean = (end_date or "").strip()
 
-    # Check if user specifically requested a single commit (e.g. "what was his first commit", "earliest commit")
-    is_singular_commit_query = any(k in raw_query for k in [
-        "first commit", "earliest commit", "oldest commit", "initial commit", "first ever commit",
-        "day one commit", "latest commit", "most recent commit"
-    ]) and extracted_limit is None
-
-    if limit is not None:
-        clean_limit = limit
-    elif extracted_limit is not None:
-        clean_limit = extracted_limit
-    elif is_singular_commit_query:
-        clean_limit = 1
-    else:
-        clean_limit = 30
-
-    # 1. Date range resolution FIRST - explicit date range is prioritized and never overridden by order="asc"
-    rng = None
-    if timeframe:
-        rng = _resolve_date_range(timeframe)
-
-    if not rng and start_date and end_date:
-        if start_date not in ("all", "lifetime") and end_date not in ("all", "lifetime"):
-            s_res = _resolve_target_date(start_date)
-            e_res = _resolve_target_date(end_date)
-            if s_res and e_res:
-                rng = (min(s_res, e_res), max(s_res, e_res))
-            elif s_res or e_res:
-                invalid_d = start_date if not s_res else end_date
-                return {
-                    "status": "error",
-                    "error": f"Invalid date: '{invalid_d}'. Please provide a valid calendar date or timeframe (e.g. 'YYYY-MM-DD', 'July 5, 2025', 'last week', or 'all time').",
-                    "start_date": start_date,
-                    "end_date": end_date,
-                    "active_repositories": [],
-                    "total_commits": 0,
-                    "direct_summary": f"Could not parse the date '{invalid_d}'. Please specify a recognized date format (e.g. YYYY-MM-DD, 'July 5, 2025', 'last week', or 'all time').",
-                    "meta_dashboard_url": "https://portfolio.ishaankoradia.com/meta"
-                }
-            else:
-                return {
-                    "status": "error",
-                    "error": f"Invalid dates: '{start_date}' and '{end_date}'.",
-                    "start_date": start_date,
-                    "end_date": end_date,
-                    "active_repositories": [],
-                    "total_commits": 0,
-                    "direct_summary": f"Could not parse '{start_date}' or '{end_date}' as valid calendar dates.",
-                    "meta_dashboard_url": "https://portfolio.ishaankoradia.com/meta"
-                }
-    elif not rng and start_date and not end_date:
-        if start_date not in ("all", "lifetime"):
-            rng = _resolve_date_range(start_date)
-            if not rng:
-                s_res = _resolve_target_date(start_date)
-                if s_res:
-                    rng = (s_res, s_res)
-                else:
-                    return {
-                        "status": "error",
-                        "error": f"Invalid date: '{start_date}'.",
-                        "start_date": start_date,
-                        "active_repositories": [],
-                        "total_commits": 0,
-                        "direct_summary": f"Could not parse '{start_date}' as a valid calendar date.",
-                        "meta_dashboard_url": "https://portfolio.ishaankoradia.com/meta"
-                    }
-    elif not rng and not start_date and end_date:
-        if end_date not in ("all", "lifetime"):
-            e_res = _resolve_target_date(end_date)
-            if e_res:
-                rng = ("2020-01-01", e_res)
-            else:
-                return {
-                    "status": "error",
-                    "error": f"Invalid date: '{end_date}'.",
-                    "end_date": end_date,
-                    "active_repositories": [],
-                    "total_commits": 0,
-                    "direct_summary": f"Could not parse '{end_date}' as a valid calendar date.",
-                    "meta_dashboard_url": "https://portfolio.ishaankoradia.com/meta"
-                }
-
-    # 1B. Check for relative offsets / partitioning from a previously queried date range:
-    # e.g. "starting from 3 days later", "starting 1 week later", "ending 2 days earlier", "ending on December 31, 2025"
-    if not rng and _LAST_QUERIED_DATE_RANGE:
-        offset_rng = _resolve_relative_offset(raw_query, _LAST_QUERIED_DATE_RANGE)
-        if offset_rng:
-            rng = offset_rng
-
-    if not rng and timeframe:
-        t_single = _resolve_target_date(timeframe)
-        if t_single:
-            rng = (t_single, t_single)
-
-    # 1C. Check for follow-up references to previously queried date range:
-    # e.g. "that timeframe", "in that timeframe", "that period", "those repos", "same timeframe"
-    relative_timeframe_phrases = [
-        "that timeframe", "that time frame", "that period", "that range",
-        "the timeframe", "the time frame", "same timeframe", "same range",
-        "in that timeframe", "in that period", "in that range", "those repos", "those repositories"
-    ]
-    is_referring_to_previous = any(p in raw_query for p in relative_timeframe_phrases)
-    has_pronoun_reference = any(p in raw_query for p in ["them", "those", "these", "the repos", "the repositories"])
-
-    if not rng and (is_referring_to_previous or has_pronoun_reference) and _LAST_QUERIED_DATE_RANGE:
-        rng = _LAST_QUERIED_DATE_RANGE
-
-    # 2. Lifetime check - only applies if explicitly requested or if requesting first ever commit with NO date range
-    is_explicit_lifetime = (
-        start_date in ("all", "lifetime")
-        or end_date in ("all", "lifetime")
-        or any(k in raw_query for k in ["start to present", "beginning to present", "all time", "lifetime", "all history", "whole history", "entire history", "from start", "since the beginning"])
-        or raw_query in ("all", "lifetime", "all time")
-    )
-    is_unbounded_earliest = (
-        not rng
-        and (
-            re.search(r'\b(?:first|earliest|oldest|initial)\b', raw_query) is not None
-            or any(k in raw_query for k in [
-                "first ever", "first commit", "earliest commit", "oldest commit",
-                "initial commit", "day one", "inception", "beginning of time"
-            ])
-        )
-    )
-
-    if is_explicit_lifetime or is_unbounded_earliest:
+    # Lifetime queries:
+    if s_clean in ("all", "lifetime") or e_clean in ("all", "lifetime"):
         return _fetch_commits_by_date_range(
             "all",
-            datetime.date.today().isoformat(),
+            today_iso,
             repo_name=clean_repo,
             order=clean_order,
             limit=clean_limit
         )
 
-    if not rng:
-        if timeframe or start_date or end_date:
-            invalid_val = timeframe or start_date or end_date
-            return {
-                "status": "error",
-                "error": f"Invalid or unparseable date/timeframe: '{invalid_val}'.",
-                "timeframe": timeframe,
-                "start_date": start_date,
-                "end_date": end_date,
-                "active_repositories": [],
-                "total_commits": 0,
-                "direct_summary": f"Could not parse the date or timeframe '{invalid_val}'. Please specify a recognized format (e.g. YYYY-MM-DD, 'July 5, 2025', 'last week', or 'all time').",
-                "meta_dashboard_url": "https://portfolio.ishaankoradia.com/meta"
-            }
-        today = datetime.date.today()
-        rng = ((today - datetime.timedelta(days=14)).isoformat(), today.isoformat())
+    # Date range string (e.g. '2025-12-25..2026-10-11') passed in start_date:
+    if ".." in s_clean:
+        parts = s_clean.split("..", 1)
+        s_clean, e_clean = parts[0].strip(), parts[1].strip()
 
-    today_iso = datetime.date.today().isoformat()
-    # Normalize inverted bounds
-    if rng[0] > rng[1]:
-        rng = (rng[1], rng[0])
+    # If neither is provided, default to past 14 days
+    if not s_clean and not e_clean:
+        s_clean = (today - datetime.timedelta(days=14)).isoformat()
+        e_clean = today_iso
+    elif s_clean and not e_clean:
+        e_clean = s_clean
+    elif not s_clean and e_clean:
+        s_clean = "2020-01-01"
+
+    # Normalize bounds if inverted
+    if s_clean > e_clean:
+        s_clean, e_clean = e_clean, s_clean
 
     # Future dates check
-    if rng[0] > today_iso:
+    if s_clean > today_iso:
         return {
             "status": "online",
-            "start_date": rng[0],
-            "end_date": rng[1],
+            "start_date": s_clean,
+            "end_date": e_clean,
             "order": clean_order,
-            "timeframe": f"{rng[0]} to {rng[1]}",
+            "timeframe": f"{s_clean} to {e_clean}",
             "active_repositories": [],
             "repositories_by_activity": [],
             "repositories_by_first_commit": [],
@@ -3204,23 +2528,23 @@ def query_git_commits_and_repositories(
             "latest_commit": None,
             "commits_by_repository": {},
             "commits": [],
-            "direct_summary": f"The requested date range ({rng[0]} to {rng[1]}) is in the future. Ishaan has not logged any commits for future dates.",
+            "note": f"Date range ({s_clean} to {e_clean}) is in the future. No commits exist.",
             "meta_dashboard_url": "https://portfolio.ishaankoradia.com/meta",
             "verified_source": "Live GitHub Commit Telemetry"
         }
 
     # Clamp end date if in future
-    if rng[1] > today_iso:
-        rng = (rng[0], today_iso)
+    if e_clean > today_iso:
+        e_clean = today_iso
 
     # Pre-GitHub history check (Ishaan's earliest commit was Sept 8, 2022)
-    if rng[1] < "2022-09-08":
+    if e_clean < "2022-09-08":
         return {
             "status": "online",
-            "start_date": rng[0],
-            "end_date": rng[1],
+            "start_date": s_clean,
+            "end_date": e_clean,
             "order": clean_order,
-            "timeframe": f"{rng[0]} to {rng[1]}",
+            "timeframe": f"{s_clean} to {e_clean}",
             "active_repositories": [],
             "repositories_by_activity": [],
             "repositories_by_first_commit": [],
@@ -3234,49 +2558,40 @@ def query_git_commits_and_repositories(
             "latest_commit": None,
             "commits_by_repository": {},
             "commits": [],
-            "direct_summary": f"Ishaan began his GitHub activity on September 8, 2022 (with his initial commit in Daily-Motivation-). No commits exist between {rng[0]} and {rng[1]}.",
+            "note": f"Date range precedes Ishaan's earliest GitHub activity on September 8, 2022. No commits exist between {s_clean} and {e_clean}.",
             "meta_dashboard_url": "https://portfolio.ishaankoradia.com/meta",
             "verified_source": "Live GitHub Commit Telemetry"
         }
 
-    # 3. Single day query
-    if rng[0] == rng[1]:
-        res = _fetch_commits_by_date(rng[0], repo_name=clean_repo)
+    # Single day query
+    if s_clean == e_clean:
+        res = _fetch_commits_by_date(s_clean, repo_name=clean_repo)
         wb = _fetch_live_workbench_data()
         cal = wb.get("contribution_velocity_history", {})
         calendar_map = cal.get("daily_contributions_map", {})
-        calendar_count = calendar_map.get(rng[0])
+        calendar_count = calendar_map.get(s_clean)
         if calendar_count is not None:
             res["total_contributions_calendar"] = calendar_count
             if calendar_count > res.get("total_commits", 0):
-                res["note"] = f"Ishaan's GitHub profile heatmap records {calendar_count} total contributions on {rng[0]} (including private repositories and push events). {res.get('total_commits', 0)} detailed commits are visible in public repositories."
+                res["note"] = f"Ishaan's GitHub profile heatmap records {calendar_count} total contributions on {s_clean} (including private repositories and push events). {res.get('total_commits', 0)} detailed commits are visible in public repositories."
         return res
 
-    # 4. Multi-day range query
-    res = _fetch_commits_by_date_range(rng[0], rng[1], repo_name=clean_repo, order=clean_order, limit=clean_limit)
-    if clean_repo and timeframe and not res.get("commits"):
-        alt = _fetch_repo_timeframe_commits(clean_repo, timeframe=timeframe, since=rng[0], until=rng[1])
-        if alt and alt.get("totalCommits", 0) > 0:
-            return alt
-    return res
+    # Multi-day range query
+    return _fetch_commits_by_date_range(s_clean, e_clean, repo_name=clean_repo, order=clean_order, limit=clean_limit)
 
 @mcp.tool()
 def get_active_repositories_by_date_range(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
-    timeframe: Optional[str] = None,
-    date_range: Optional[str] = None,
     repo_name: Optional[str] = None,
-    order: Optional[str] = "desc",
-    limit: Optional[int] = 30
+    order: str = "desc",
+    limit: int = 30
 ) -> Dict[str, Any]:
-    """Retrieves the exact, verified list of GitHub repositories Ishaan worked on (along with commit counts, commit messages, and lines of code changed) between two dates or over a timeframe. Delegates directly to query_git_commits_and_repositories."""
-    effective_tf = date_range or timeframe
+    """Retrieves the exact, verified list of GitHub repositories Ishaan worked on (along with commit counts, first/latest commit dates, and messages) between two ISO dates (YYYY-MM-DD). Delegates directly to query_git_commits_and_repositories."""
     return query_git_commits_and_repositories(
         start_date=start_date,
         end_date=end_date,
         repo_name=repo_name,
-        timeframe=effective_tf,
         order=order,
         limit=limit
     )
@@ -3284,17 +2599,19 @@ def get_active_repositories_by_date_range(
 @mcp.tool()
 def get_git_commits_by_date(
     date: Optional[str] = None,
-    timeframe: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
     repo_name: Optional[str] = None,
-    order: Optional[str] = "desc",
-    limit: Optional[int] = None
+    order: str = "desc",
+    limit: int = 30
 ) -> Dict[str, Any]:
-    """Retrieves Ishaan's exact, intricate commit details for any specific past date, date range, ordinal position (e.g. first/earliest commit), or relative timeframe. Delegates directly to query_git_commits_and_repositories."""
-    effective_d = date or timeframe
+    """Retrieves Ishaan's exact, intricate commit details for a specific ISO date (YYYY-MM-DD) or ISO date range. Delegates directly to query_git_commits_and_repositories."""
+    effective_start = start_date or date
+    effective_end = end_date or (date if not start_date else None)
     return query_git_commits_and_repositories(
-        start_date=effective_d,
+        start_date=effective_start,
+        end_date=effective_end,
         repo_name=repo_name,
-        timeframe=timeframe,
         order=order,
         limit=limit
     )
@@ -3331,13 +2648,16 @@ def get_eda_research(study_name: Optional[str] = None) -> Dict[str, Any]:
 
 @mcp.tool()
 def get_current_music() -> str:
-    """Check what music Ishaan is currently listening to (or recently played) on Spotify."""
+    """Check what music Ishaan is currently listening to (or recently played) on Spotify. If headphones are idle, reveals his dynamic top 3 rotation genres."""
     info = get_spotify_playback()
     if info.get("isPlaying"):
-        return f"Ishaan is currently listening to '{info.get('title')}' by {info.get('artist')} on Spotify. Link: {info.get('songUrl')}"
+        genre_str = f" [Genre: {info.get('primaryGenre')}]" if info.get("primaryGenre") else ""
+        return f"Ishaan is currently listening to '{info.get('title')}' by {info.get('artist')}{genre_str} on Spotify. Link: {info.get('songUrl')}"
     elif info.get("title"):
         played_str = f" (played at {info.get('playedAt')})" if info.get("playedAt") else ""
-        return f"Ishaan recently listened to '{info.get('title')}' by {info.get('artist')} on Spotify{played_str}. Link: {info.get('songUrl')}"
+        top_genres = info.get("topGenres", [])
+        genre_mention = f" Headphones are idle (deep work mode) — his dynamic top rotation genres right now are: {', '.join(top_genres)}." if top_genres else ""
+        return f"Ishaan isn't playing music right now.{genre_mention} His most recently played track was '{info.get('title')}' by {info.get('artist')} on Spotify{played_str}. Link: {info.get('songUrl')}"
     return "No music playback currently active on Spotify."
 
 @mcp.tool()
@@ -3376,6 +2696,7 @@ def get_portfolio_website_info(tab: Optional[str] = None) -> Dict[str, Any]:
     pages = site_struct.get("pages", {})
     deps = site_struct.get("dependencies", {})
     meta_arch = site_struct.get("meta_tab_architecture", {})
+    proj_arch = site_struct.get("projects_tab_architecture", {})
 
     dynamic_tabs = {}
     for nav in nav_tabs:
@@ -3421,11 +2742,20 @@ def get_portfolio_website_info(tab: Optional[str] = None) -> Dict[str, Any]:
             if "meta" in matched_key:
                 response["meta_tab_architecture"] = meta_arch
             elif "projects" in matched_key:
+                response["projects_tab_architecture"] = proj_arch
                 response["live_projects_count"] = len(p_data.get("projects", []))
-                response["featured_projects"] = [
-                    {"title": p.get("title"), "category": p.get("category"), "tags": p.get("tags")}
+                response["featured_flagship_projects"] = [
+                    {
+                        "title": p.get("title"),
+                        "category": p.get("category"),
+                        "description": p.get("description"),
+                        "tags": p.get("tags"),
+                        "live_url": p.get("liveUrl"),
+                        "github_url": p.get("githubUrl")
+                    }
                     for p in p_data.get("projects", []) if p.get("featured")
                 ]
+                response["exploratory_data_analysis_studies"] = proj_arch.get("featured_eda_studies", [])
             elif "work" in matched_key or "resume" in matched_key:
                 response["career_experience"] = [
                     {"role": e.get("role"), "organization": e.get("organization"), "period": e.get("period")}
@@ -3440,6 +2770,7 @@ def get_portfolio_website_info(tab: Optional[str] = None) -> Dict[str, Any]:
         "navigation_tabs": nav_tabs,
         "tabs_detail": dynamic_tabs,
         "meta_tab_live_telemetry": meta_arch,
+        "projects_tab_architecture": proj_arch,
         "dependencies": deps,
         "distinction_note": "Ishaan maintains TWO separate platforms: 1. Personal Website (ishaankoradia.com) structured into 7 narrative chapters, and 2. Portfolio Website (portfolio.ishaankoradia.com) structured into tabs: 01 Projects, 02 Work / Resume, and 03 Meta.",
         "verified_source": "Dynamically fetched from ishaankor/my-data-science-portfolio repository & live telemetry"
@@ -3527,26 +2858,10 @@ def get_website_chapter(chapter_identifier: str) -> Dict[str, Any]:
     }
 
 @mcp.tool()
-def get_passion_projects() -> Dict[str, Any]:
-    """Retrieves Ishaan's creative passion projects built while studying in college (Chapter 05 — The Sandbox): Transformi, Daily Motivation, and NotesTaker!. ALWAYS invoke this tool when asked specifically about Ishaan's passion projects or college creator projects."""
-    w_data = fetch_live_website_data()
-    sandbox = w_data.get("chapter_05_sandbox", {})
-    return {
-        "chapter": "Chapter 05 — The Sandbox",
-        "title": "The Creative Sandbox",
-        "subtitle": "Some of my passion projects while studying in college.",
-        "passion_projects": sandbox.get("projects", []),
-        "distinction_note": "These are Ishaan's college passion projects (Transformi, Daily Motivation, NotesTaker). Larger applications like Datafy (Chapter 03) and RigScouter-AI (Chapter 04) are flagship production platforms, NOT college passion projects.",
-        "verified_source": "Live dynamically parsed from ishaankor/my-personal-website (index.html Chapter 05)"
-    }
-
-@mcp.tool()
 def list_projects() -> Dict[str, Any]:
     """Exposes software engineering applications, AI platforms, developer tools, and web applications built by Ishaan.
-    DISTINCTION:
-    - When asked specifically about 'passion projects', refer to college_passion_projects / invoke get_passion_projects (Transformi, Daily Motivation, NotesTaker!).
-    - Large-scale platforms like Datafy (Chapter 03 The Mind) and RigScouter-AI (Chapter 04 The Frontier) are flagship production software systems, NOT college passion projects.
-    - For Exploratory Data Analysis (EDA) studies and research, invoke get_eda_research instead."""
+    Categorizes projects into college_passion_projects (Chapter 05 Sandbox: Transformi, Daily Motivation, NotesTaker!), flagship_production_systems (Datafy, RigScouter-AI), and all portfolio projects.
+    For Exploratory Data Analysis (EDA) studies and research, invoke get_eda_research instead."""
     p_data = fetch_live_portfolio_data()
     w_data = fetch_live_website_data()
     repos = fetch_live_github_repos()
