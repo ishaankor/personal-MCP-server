@@ -1976,7 +1976,7 @@ def _fetch_commits_by_date(target_date: str, repo_name: Optional[str] = None) ->
         res = requests.get(url, headers={"User-Agent": "MCP-Portfolio-Server"}, timeout=10)
         if res.status_code == 200:
             data = res.json()
-            if data and data.get("status") == "online" and "commits" in data:
+            if data and data.get("status") == "online" and ("commits" in data or "totalCommits" in data):
                 commits = data.get("commits", [])
                 return {
                     "status": "online",
@@ -1984,6 +1984,7 @@ def _fetch_commits_by_date(target_date: str, repo_name: Optional[str] = None) ->
                     "repository": clean_repo,
                     "total_commits": data.get("totalCommits", len(commits)),
                     "commits": commits,
+                    "contribution_telemetry": data.get("contributionTelemetry"),
                     "meta_page_url": "https://portfolio.ishaankoradia.com/meta",
                     "verified_source": "Live dynamically fetched via Github-Meta-Fetcher /api/github?date=..."
                 }
@@ -2038,12 +2039,13 @@ def _fetch_commits_by_date_range(
     fetcher_by_first: List[Dict[str, Any]] = []
     fetcher_by_latest: List[Dict[str, Any]] = []
     fetcher_by_activity: List[Dict[str, Any]] = []
+    fetcher_contribution_telemetry: Optional[Dict[str, Any]] = None
 
     try:
         res = requests.get(url, headers={"User-Agent": "MCP-Portfolio-Server"}, timeout=12)
         if res.status_code == 200:
             data = res.json()
-            if data and "commits" in data:
+            if data and ("commits" in data or "totalCommits" in data):
                 commits = data.get("commits", [])
                 total_commits = data.get("totalCommits", len(commits))
                 fetcher_active_repos = data.get("activeRepositories", [])
@@ -2054,6 +2056,7 @@ def _fetch_commits_by_date_range(
                 fetcher_by_first = data.get("repositoriesByFirstCommit", fetcher_chronological)
                 fetcher_by_latest = data.get("repositoriesByLatestCommit", [])
                 fetcher_by_activity = data.get("repositoriesByActivity", [])
+                fetcher_contribution_telemetry = data.get("contributionTelemetry")
     except Exception as e:
         print(f"[Git Commits Range] Error fetching via Github-Meta-Fetcher for {date_param}: {e}")
 
@@ -2164,6 +2167,7 @@ def _fetch_commits_by_date_range(
             for r, r_commits in sorted(repo_map.items(), key=lambda x: -len(x[1]))
         },
         "commits": commits[:clean_limit],
+        "contribution_telemetry": fetcher_contribution_telemetry,
         "meta_dashboard_url": "https://portfolio.ishaankoradia.com/meta",
         "verified_source": "Live dynamically fetched via GitHub Commit Telemetry & Github-Meta-Fetcher microservice"
     }
