@@ -1034,10 +1034,8 @@ def fetch_live_eda_studies(study_name: Optional[str] = None) -> List[Dict[str, A
                 "last_updated": repo.get("updated_at"),
                 "demo_video_url": demo_video_url,
                 "research_question": research_question,
-                "key_finding": key_finding,
                 "live_documentation": documentation_sections
             })
-            
         _EDA_CACHE = studies
         _EDA_CACHE_TIME = now
         
@@ -1441,7 +1439,7 @@ def _build_static_kb():
                 f"GitHub Workbench & Git Telemetry: Active engineering repository: '{repo_name}'. "
                 f"Latest commit: '{commit_msg}' (hash: {lc.get('sha', '')}, time: {lc.get('time_ago', '')}). "
                 f"Lines of code changed in latest commit: {lines_chg} total lines ({adds} additions, {dels} deletions across {files_cnt} files). "
-                f"Public repositories count: {wb_initial.get('public_repositories_count', 21)}. "
+                f"Public repositories count: {wb_initial.get('public_repositories_count', 20)}. "
                 f"For full interactive Git telemetry, Codebase Evolution (LOC graphs), and developer habit analytics, visit Ishaan's Meta page: https://portfolio.ishaankoradia.com/meta. "
                 f"Source: Real-time GitHub commit stream and Meta fetcher."
             )
@@ -1960,6 +1958,8 @@ def _parse_contribution_calendar(cal: Dict[str, Any]) -> Dict[str, Any]:
 def _fetch_commits_by_date(target_date: str, repo_name: Optional[str] = None) -> Dict[str, Any]:
     """Fetches commit telemetry (messages, SHAs, repos, diff stats, modified files) for a specific date (YYYY-MM-DD) via Github-Meta-Fetcher."""
     clean_date = (target_date or "").strip()
+    if "T" in clean_date:
+        clean_date = clean_date.split("T")[0].strip()
     clean_repo = repo_name.strip().rstrip("/") if repo_name else None
     if clean_repo and "/" in clean_repo:
         clean_repo = clean_repo.split("/")[-1]
@@ -2014,9 +2014,16 @@ def _fetch_commits_by_date_range(
     clean_order = "asc" if (order or "").strip().lower() in ("asc", "oldest", "earliest") else "desc"
     clean_limit = max(1, min(int(limit or 30), 100))
 
-    is_lifetime = start_date in ("all", "lifetime") or end_date in ("all", "lifetime")
+    s_clean = (start_date or "").strip()
+    e_clean = (end_date or "").strip()
+    if "T" in s_clean:
+        s_clean = s_clean.split("T")[0].strip()
+    if "T" in e_clean:
+        e_clean = e_clean.split("T")[0].strip()
 
-    date_param = "all" if is_lifetime else f"{start_date}..{end_date}"
+    is_lifetime = s_clean in ("all", "lifetime") or e_clean in ("all", "lifetime")
+
+    date_param = "all" if is_lifetime else f"{s_clean}..{e_clean}"
     url = f"https://personal-meta-fetcher.vercel.app/api/github?date={urllib.parse.quote(date_param)}&order={clean_order}&limit={clean_limit}"
     if clean_repo:
         url += f"&repo={urllib.parse.quote(clean_repo)}"
@@ -2248,7 +2255,7 @@ def _fetch_live_workbench_data() -> Dict[str, Any]:
                 "contribution_velocity_history": cal_summary,
                 "meta_page_url": "https://portfolio.ishaankoradia.com/meta",
                 "meta_page_promotion": "Explore Ishaan's live Meta telemetry page at https://portfolio.ishaankoradia.com/meta for interactive Codebase Evolution (LOC charts), Developer Habits Matrix, and repository analytics.",
-                "public_repositories_count": data.get("totalRepos") or len(fetch_live_github_repos()),
+                "public_repositories_count": data.get("totalRepos") or (data.get("user", {}).get("public_repos") if isinstance(data.get("user"), dict) else None) or len(fetch_live_github_repos()),
                 "status": "Live telemetry connected"
             }
     except Exception as e:
@@ -2279,6 +2286,10 @@ def _fetch_repo_commit_telemetry(repo_name: str) -> Optional[Dict[str, Any]]:
             data = json.loads(r.read().decode())
             if data.get("repoCommit"):
                 return data["repoCommit"]
+            elif data.get("latestCommit"):
+                return data["latestCommit"]
+            elif data.get("commits") and len(data["commits"]) > 0:
+                return data["commits"][0]
     except Exception as e:
         print(f"Error proxying repo commit telemetry for {repo_name} through Github-Meta-Fetcher: {e}")
     return None
@@ -2296,9 +2307,11 @@ def _fetch_repo_timeframe_commits(
             
         params = {"repo": clean_repo}
         if since:
-            params["since"] = since
+            clean_since = since.split("T")[0].strip() if "T" in since else since.strip()
+            params["since"] = clean_since
         if until:
-            params["until"] = until
+            clean_until = until.split("T")[0].strip() if "T" in until else until.strip()
+            params["until"] = clean_until
             
         fetcher_base = os.getenv("GITHUB_META_FETCHER_URL", "https://personal-meta-fetcher.vercel.app/api/github")
         fetcher_url = f"{fetcher_base}?{urllib.parse.urlencode(params)}"
@@ -2323,12 +2336,12 @@ def get_repo_commit_activity(
     since: Optional[str] = None,
     until: Optional[str] = None
 ) -> Dict[str, Any]:
-    """Retrieves Ishaan's exact commit count, commit messages, code diffs (+additions/-deletions), and commit history for a specific repository (e.g. Datafy, RigScouter-AI, my-personal-website, my-data-science-portfolio) over an explicit ISO date range.
+    """Retrieves Ishaan's exact commit count, commit messages, code diffs (+additions/-deletions), and commit history for a specific repository (e.g. Datafy, RigScouter-AI, my-personal-website, my-data-science-portfolio).
     Parameters:
     - repo_name: Name of the repository (e.g. 'Datafy', 'RigScouter-AI').
-    - since: Optional ISO start date (YYYY-MM-DD).
+    - since: Optional ISO start date (YYYY-MM-DD). If omitted, retrieves all commits across the repository.
     - until: Optional ISO end date (YYYY-MM-DD).
-    The AI brain computes the ISO dates and interprets the returned commit records and statistics. Proxies strictly through Github-Meta-Fetcher and promotes https://portfolio.ishaankoradia.com/meta."""
+    The AI brain interprets the returned commit records and statistics. Proxies strictly through Github-Meta-Fetcher and promotes https://portfolio.ishaankoradia.com/meta."""
     all_repos = fetch_live_github_repos()
     target_repo = resolve_project_name(repo_name, all_repos) or repo_name
     return _fetch_repo_timeframe_commits(target_repo, since=since, until=until)
@@ -2347,7 +2360,11 @@ def get_git_telemetry(
         target_repo = resolve_project_name(repo_name, all_repos)
 
     if target_repo:
-        repo_commit = _fetch_repo_commit_telemetry(target_repo)
+        repo_data = _fetch_repo_timeframe_commits(target_repo, since=since, until=until)
+        commits_list = repo_data.get("commits", [])
+        total_commits_count = repo_data.get("totalCommits", len(commits_list))
+        repo_commit = repo_data.get("latestCommit") or repo_data.get("repoCommit") or (commits_list[0] if commits_list else _fetch_repo_commit_telemetry(target_repo))
+
         lines_changed = 0
         additions = 0
         deletions = 0
@@ -2367,6 +2384,8 @@ def get_git_telemetry(
 
         res_repo = {
             "repository": target_repo,
+            "total_commits": total_commits_count,
+            "commits": commits_list,
             "latest_commit": repo_commit,
             "commit_hash": repo_commit.get("shortSha") or (repo_commit.get("sha", "")[:7]) if repo_commit else None,
             "commit_message": repo_commit.get("message") if repo_commit else None,
@@ -2380,7 +2399,7 @@ def get_git_telemetry(
             "verified_source": f"Live dynamically proxied for {target_repo} via Github-Meta-Fetcher & /meta telemetry"
         }
         if since or until:
-            res_repo["range_commits"] = _fetch_repo_timeframe_commits(target_repo, since=since, until=until)
+            res_repo["range_commits"] = repo_data
         elif date:
             res_repo["commits_on_date"] = _fetch_commits_by_date(date, repo_name=target_repo)
         return res_repo
@@ -2494,10 +2513,26 @@ def query_git_commits_and_repositories(
         parts = s_clean.split("..", 1)
         s_clean, e_clean = parts[0].strip(), parts[1].strip()
 
-    # If neither is provided, default to past 14 days
+    # Strip any ISO timestamp component (e.g. '2026-04-19T00:00:00Z' -> '2026-04-19')
+    if "T" in s_clean and s_clean not in ("all", "lifetime"):
+        s_clean = s_clean.split("T")[0].strip()
+    if "T" in e_clean and e_clean not in ("all", "lifetime"):
+        e_clean = e_clean.split("T")[0].strip()
+
+    # If neither is provided:
     if not s_clean and not e_clean:
-        s_clean = (today - datetime.timedelta(days=14)).isoformat()
-        e_clean = today_iso
+        if clean_repo:
+            # When querying a specific repository without an explicit date timeframe, query all-time for that repository
+            return _fetch_commits_by_date_range(
+                "all",
+                today_iso,
+                repo_name=clean_repo,
+                order=clean_order,
+                limit=clean_limit
+            )
+        else:
+            s_clean = (today - datetime.timedelta(days=14)).isoformat()
+            e_clean = today_iso
     elif s_clean and not e_clean:
         e_clean = s_clean
     elif not s_clean and e_clean:
@@ -2858,9 +2893,13 @@ def get_website_chapter(chapter_identifier: str) -> Dict[str, Any]:
     }
 
 @mcp.tool()
-def list_projects() -> Dict[str, Any]:
+def list_projects(query: Optional[str] = None) -> Dict[str, Any]:
     """Exposes software engineering applications, AI platforms, developer tools, and web applications built by Ishaan.
     Categorizes projects into college_passion_projects (Chapter 05 Sandbox: Transformi, Daily Motivation, NotesTaker!), flagship_production_systems (Datafy, RigScouter-AI), and all portfolio projects.
+    
+    Parameters:
+    - query: Optional case-insensitive search string or letter sequence (e.g. 'ty', 'data', 'ai') to deterministically filter repositories, projects, and research studies by exact title or description matches. ALWAYS pass this parameter when asked for projects containing specific letters, words, or substrings.
+    
     For Exploratory Data Analysis (EDA) studies and research, invoke get_eda_research instead."""
     p_data = fetch_live_portfolio_data()
     w_data = fetch_live_website_data()
@@ -2871,11 +2910,12 @@ def list_projects() -> Dict[str, Any]:
     sandbox_projects = w_data.get("chapter_05_sandbox", {}).get("projects", [])
     
     # Exclude EDA research studies from the software engineering projects catalog
-    eda_names = {s["repository"].lower() for s in fetch_live_eda_studies()}
+    eda_studies = fetch_live_eda_studies()
+    eda_names = {str(s.get("repository") or "").lower() for s in eda_studies if s.get("repository")}
     
     catalog = []
     for repo in repos:
-        name = repo.get("name", "")
+        name = str(repo.get("name") or "")
         if name.lower() in eda_names:
             continue
         catalog.append({
@@ -2893,6 +2933,72 @@ def list_projects() -> Dict[str, Any]:
                 "last_updated": repo.get("updated_at")
             }
         })
+
+    if query:
+        q = query.lower().strip()
+        name_matches = []
+        desc_matches = []
+
+        # Check GitHub repos
+        for repo in catalog:
+            r_name = str(repo.get("name") or "")
+            r_desc = str(repo.get("description") or "")
+            if q in r_name.lower():
+                name_matches.append({
+                    "name": r_name,
+                    "type": "Software Repository",
+                    "github_url": repo.get("github_url"),
+                    "description": r_desc
+                })
+            # Description matches disabled – only name matches are returned
+
+        # Check Portfolio projects
+        for pf in portfolio_projects:
+            p_title = str(pf.get("title") or "")
+            p_desc = str(pf.get("description") or "")
+            if q in p_title.lower() and not any(m["name"].lower() == p_title.lower() for m in name_matches):
+                name_matches.append({
+                    "name": p_title,
+                    "type": "Flagship Project",
+                    "live_url": pf.get("liveUrl"),
+                    "github_url": pf.get("githubUrl"),
+                    "description": p_desc
+                })
+
+        # Check Sandbox projects
+        for sp in sandbox_projects:
+            s_title = str(sp.get("title") or "")
+            s_desc = str(sp.get("description") or "")
+            if q in s_title.lower() and not any(m["name"].lower() == s_title.lower() for m in name_matches):
+                name_matches.append({
+                    "name": s_title,
+                    "type": "College Passion Project",
+                    "github_url": sp.get("github_url"),
+                    "description": s_desc
+                })
+
+        # Check EDA studies
+        eda_matches = []
+        for es in eda_studies:
+            e_title = str(es.get("title") or "")
+            e_repo = str(es.get("repository") or "")
+            e_desc = str(es.get("summary") or es.get("description") or "")
+            if q in e_title.lower() or q in e_repo.lower():
+                eda_matches.append({
+                    "name": e_title or e_repo,
+                    "type": "Data Science Research Study (EDA)",
+                    "github_url": es.get("github_url"),
+                    "summary": e_desc,
+                    "matched_in": "title/repository"
+                })
+
+        return {
+            "query": query,
+            "total_matches": len(name_matches) + len(eda_matches),
+            "projects_with_query_in_name": name_matches,
+            "research_studies_with_query_in_name": eda_matches,
+            "projects_with_query_in_description": [],
+        }
     return {
         "college_passion_projects": {
             "description": "Some of Ishaan's passion projects while studying in college (from Personal Website Chapter 05 — The Creative Sandbox). ALWAYS cite these when asked about passion projects.",
@@ -3014,6 +3120,52 @@ def get_portfolio_resume_and_work() -> Dict[str, Any]:
         "current_rabbit_holes_and_learning": data.get("learningNow", []),
         "detailed_skills_matrix": data.get("detailedSkills", {}),
         "verified_source": "Live dynamically fetched from ishaankor/my-data-science-portfolio (data/portfolio.ts) and portfolio.ishaankoradia.com/work"
+    }
+
+@mcp.tool()
+def get_basic_info_and_facts() -> Dict[str, Any]:
+    """Retrieves Ishaan Koradia's basic biographical facts, birthday (April 19), location (Bay Area / San Jose, CA & San Diego, CA), contact details (email, phone, socials), education, and curated fun facts. ALWAYS invoke this tool when asked about Ishaan's birthday, age, where he lives or is based, contact info, personal background, personality, or fun facts."""
+    p_data = fetch_live_portfolio_data()
+    gh_user = p_data.get("githubUsername", GITHUB_USERNAME)
+    return {
+        "name": "Ishaan Koradia",
+        "birthday": "April 19",
+        "location": {
+            "current_base": "Bay Area / San Jose, CA",
+            "previous_academic_base": "San Diego, CA (during UC San Diego)",
+            "work_flexibility": "Open to local (Silicon Valley / San Francisco Bay Area) and remote engineering roles"
+        },
+        "contact_info": {
+            "email": "ishaankor@gmail.com",
+            "alternate_email": "ishaankoradia@gmail.com",
+            "phone": p_data.get("phone", ""),
+            "website": "https://ishaankoradia.com",
+            "portfolio": "https://portfolio.ishaankoradia.com",
+            "github": f"https://github.com/{gh_user}",
+            "linkedin": p_data.get("linkedin", "https://linkedin.com/in/ishaankoradia"),
+            "twitter": p_data.get("twitter", "https://twitter.com/ishaankoradia")
+        },
+        "current_status": {
+            "title": p_data.get("title", "AI Engineer"),
+            "company": "Handshake AI",
+            "focus": "Frontier LLM evaluation with NVIDIA (Nemotron-12B), golden benchmark curation, and Model Context Protocol (MCP) agent architectures"
+        },
+        "education": {
+            "college": "University of California, San Diego (UCSD)",
+            "degree": "B.S. in Cognitive Science (Specialization in Machine Learning & Neural Computation)",
+            "minor": "Data Science",
+            "gpa": "3.76",
+            "high_school": "Milpitas High School (Graduated 2022)"
+        },
+        "fun_facts": [
+            "Enjoys going on hikes with family and spending time with nature.",
+            "Avid reader who loves to learn a new thing every day.",
+            "Casual gamer who loves multiplayer games and old classics.",
+            "Fan of all music genres and is incredibly open-minded when recommended new music.",
+            "Loves playing football and basketball with friends.",
+            "Dedicated to fitness and weightlifting.",
+        ],
+        "verified_source": "Personal profile & live portfolio telemetry (portfolio.ts / about_me.txt)"
     }
 
 app = mcp.streamable_http_app()
