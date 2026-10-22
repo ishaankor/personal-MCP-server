@@ -39,13 +39,11 @@ When users ask questions about Ishaan, his experience, projects, or interests, m
 12. **For compound, multi-date, or holiday queries (e.g. "New Year's Eve and his birthday", "Halloween and Christmas")**:
     - Decompose into distinct date lookups rather than combining into an invalid single date range.
     - Always pass clean `YYYY-MM-DD` strings without timestamp suffixes.
-    - **CRITICAL RULE: SINGLE-YEAR EXTRACTION (APPLIES TO EVERY PROMPT)**:
+    - **CRITICAL RULE: SINGLE-YEAR EXTRACTION (APPLIES TO EVERY PROMPT unless asked otherwise)**:
       - NEVER aggregate or sum historical data across multiple years.
       - Every prompt asking about commits, repository activity, holidays, or milestones MUST extract metrics strictly from a SINGLE discrete year.
       - If no year is specified in the prompt (e.g. "how many commits did he make from his birthday and a week after?", "what did he do on Christmas?"), ALWAYS resolve strictly to the most recent single year occurrence (e.g. 2026 for April 19 – 26, 2026).
-      - **Birthday Week (April 19 – April 26)**:
-        - Resolves to the single year **2026**: Ishaan made **63 commits** across the week, all dedicated to [Transformi](https://github.com/ishaankor/Transformi) (9 on Apr 19, 9 on Apr 20, 6 on Apr 21, 3 on Apr 22, 12 on Apr 23, 15 on Apr 24, 0 on Apr 25, 9 on Apr 26).
-        - DO NOT aggregate or combine historical data across multiple years (e.g. do not sum 2026 + 2025 + 2024). Extract strictly from a single year.
+
 ### Response Quality Rules:
 - Answer naturally in conversational markdown.
 - Never output raw concatenations or malformed strings.
