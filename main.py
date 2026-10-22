@@ -1955,6 +1955,8 @@ def _parse_contribution_calendar(cal: Dict[str, Any]) -> Dict[str, Any]:
         "meta_heatmap_url": "https://portfolio.ishaankoradia.com/meta"
     }
 
+KNOWN_PRIVATE_REPOSITORIES = {"personal-MCP-server", "datafy-brain"}
+
 def _fetch_commits_by_date(target_date: str, repo_name: Optional[str] = None) -> Dict[str, Any]:
     """Fetches commit telemetry (messages, SHAs, repos, diff stats, modified files) for a specific date (YYYY-MM-DD) via Github-Meta-Fetcher."""
     clean_date = (target_date or "").strip()
@@ -1963,6 +1965,18 @@ def _fetch_commits_by_date(target_date: str, repo_name: Optional[str] = None) ->
     clean_repo = repo_name.strip().rstrip("/") if repo_name else None
     if clean_repo and "/" in clean_repo:
         clean_repo = clean_repo.split("/")[-1]
+
+    # If caller requested a known private repo, return 0 commits to preserve privacy
+    if clean_repo and clean_repo in KNOWN_PRIVATE_REPOSITORIES:
+        return {
+            "status": "online",
+            "date": clean_date,
+            "repository": clean_repo,
+            "total_commits": 0,
+            "commits": [],
+            "meta_page_url": "https://portfolio.ishaankoradia.com/meta",
+            "verified_source": "Public telemetry only (private repositories excluded)"
+        }
 
     # If caller passed a date range formatted as start..end, delegate directly
     if ".." in clean_date:
@@ -1977,13 +1991,17 @@ def _fetch_commits_by_date(target_date: str, repo_name: Optional[str] = None) ->
         if res.status_code == 200:
             data = res.json()
             if data and data.get("status") == "online" and ("commits" in data or "totalCommits" in data):
-                commits = data.get("commits", [])
+                raw_commits = data.get("commits", [])
+                public_commits = [
+                    c for c in raw_commits
+                    if (c.get("repoName") or "") not in KNOWN_PRIVATE_REPOSITORIES
+                ]
                 return {
                     "status": "online",
                     "date": clean_date,
                     "repository": clean_repo,
-                    "total_commits": data.get("totalCommits", len(commits)),
-                    "commits": commits,
+                    "total_commits": len(public_commits) if len(public_commits) != len(raw_commits) else data.get("totalCommits", len(public_commits)),
+                    "commits": public_commits,
                     "contribution_telemetry": data.get("contributionTelemetry"),
                     "meta_page_url": "https://portfolio.ishaankoradia.com/meta",
                     "verified_source": "Live dynamically fetched via Github-Meta-Fetcher /api/github?date=..."
@@ -2011,6 +2029,20 @@ def _fetch_commits_by_date_range(
     clean_repo = repo_name.strip().rstrip("/") if repo_name else None
     if clean_repo and "/" in clean_repo:
         clean_repo = clean_repo.split("/")[-1]
+
+    # If caller requested a known private repo, return 0 commits
+    if clean_repo and clean_repo in KNOWN_PRIVATE_REPOSITORIES:
+        return {
+            "status": "online",
+            "date": f"{(start_date or '').strip()}..{(end_date or '').strip()}",
+            "repository": clean_repo,
+            "total_commits": 0,
+            "commits": [],
+            "active_repositories": [],
+            "repository_commit_counts": {},
+            "meta_page_url": "https://portfolio.ishaankoradia.com/meta",
+            "verified_source": "Public telemetry only (private repositories excluded)"
+        }
 
     clean_order = "asc" if (order or "").strip().lower() in ("asc", "oldest", "earliest") else "desc"
     clean_limit = max(1, min(int(limit or 30), 100))
@@ -2046,16 +2078,38 @@ def _fetch_commits_by_date_range(
         if res.status_code == 200:
             data = res.json()
             if data and ("commits" in data or "totalCommits" in data):
-                commits = data.get("commits", [])
-                total_commits = data.get("totalCommits", len(commits))
-                fetcher_active_repos = data.get("activeRepositories", [])
-                fetcher_repo_counts = data.get("repositoryCommitCounts", {})
+                raw_commits = data.get("commits", [])
+                commits = [
+                    c for c in raw_commits
+                    if (c.get("repoName") or "") not in KNOWN_PRIVATE_REPOSITORIES
+                ]
+                fetcher_repo_counts = {
+                    r: cnt for r, cnt in data.get("repositoryCommitCounts", {}).items()
+                    if r not in KNOWN_PRIVATE_REPOSITORIES
+                }
+                fetcher_active_repos = [
+                    r for r in data.get("activeRepositories", [])
+                    if r not in KNOWN_PRIVATE_REPOSITORIES
+                ]
+                total_commits = sum(fetcher_repo_counts.values()) if fetcher_repo_counts else len(commits)
                 fetcher_earliest = data.get("earliestCommit")
                 fetcher_latest = data.get("latestCommit")
-                fetcher_chronological = data.get("activeRepositoriesChronological", [])
-                fetcher_by_first = data.get("repositoriesByFirstCommit", fetcher_chronological)
-                fetcher_by_latest = data.get("repositoriesByLatestCommit", [])
-                fetcher_by_activity = data.get("repositoriesByActivity", [])
+                fetcher_chronological = [
+                    x for x in data.get("activeRepositoriesChronological", [])
+                    if x.get("repository") not in KNOWN_PRIVATE_REPOSITORIES
+                ]
+                fetcher_by_first = [
+                    x for x in data.get("repositoriesByFirstCommit", fetcher_chronological)
+                    if x.get("repository") not in KNOWN_PRIVATE_REPOSITORIES
+                ]
+                fetcher_by_latest = [
+                    x for x in data.get("repositoriesByLatestCommit", [])
+                    if x.get("repository") not in KNOWN_PRIVATE_REPOSITORIES
+                ]
+                fetcher_by_activity = [
+                    x for x in data.get("repositoriesByActivity", [])
+                    if x.get("repository") not in KNOWN_PRIVATE_REPOSITORIES
+                ]
                 fetcher_contribution_telemetry = data.get("contributionTelemetry")
     except Exception as e:
         print(f"[Git Commits Range] Error fetching via Github-Meta-Fetcher for {date_param}: {e}")
@@ -2611,8 +2665,6 @@ def query_git_commits_and_repositories(
         calendar_count = calendar_map.get(s_clean)
         if calendar_count is not None:
             res["total_contributions_calendar"] = calendar_count
-            if calendar_count > res.get("total_commits", 0):
-                res["note"] = f"Ishaan's GitHub profile heatmap records {calendar_count} total contributions on {s_clean} (including private repositories and push events). {res.get('total_commits', 0)} detailed commits are visible in public repositories."
         return res
 
     # Multi-day range query
