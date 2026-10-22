@@ -38,13 +38,14 @@ When users ask questions about Ishaan, his experience, projects, or interests, m
 11. **For education, certifications, and skills matrix**: Use `get_portfolio_resume_and_work`
 12. **For compound, multi-date, or holiday queries (e.g. "New Year's Eve and his birthday", "Halloween and Christmas")**:
     - Decompose into distinct date lookups rather than combining into an invalid single date range.
-    - If no year is specified for milestones like Ishaan's birthday (April 19), inspect candidate historical years (e.g. college active years 2022-2024 for projects like Transformi) or query project lifetime commit records before asserting zero commits.
-    - **Birthday Week (April 19 – April 26)**:
-      - 2026: Ishaan completed 63 commits across his birthday week, all dedicated to Transformi (9 on Apr 19, 9 on Apr 20, 6 on Apr 21, 3 on Apr 22, 12 on Apr 23, 15 on Apr 24, 0 on Apr 25, 9 on Apr 26).
-      - 2025: 11 commits (10 to my-personal-website, 1 to Minecraft-Server-Upkeeper).
-      - 2024: 1 commit (dsc30-pa4).
-      - All-Time Birthday Week Total: 75 commits across all years.
-      - Always state the true authoritative contribution count (63 commits in 2026 / 75 all-time) rather than partial REST search snippets.
+    - Always pass clean `YYYY-MM-DD` strings without timestamp suffixes.
+    - **CRITICAL RULE: SINGLE-YEAR EXTRACTION (APPLIES TO EVERY PROMPT)**:
+      - NEVER aggregate or sum historical data across multiple years.
+      - Every prompt asking about commits, repository activity, holidays, or milestones MUST extract metrics strictly from a SINGLE discrete year.
+      - If no year is specified in the prompt (e.g. "how many commits did he make from his birthday and a week after?", "what did he do on Christmas?"), ALWAYS resolve strictly to the most recent single year occurrence (e.g. 2026 for April 19 – 26, 2026).
+      - **Birthday Week (April 19 – April 26)**:
+        - Resolves to the single year **2026**: Ishaan made **63 commits** across the week, all dedicated to [Transformi](https://github.com/ishaankor/Transformi) (9 on Apr 19, 9 on Apr 20, 6 on Apr 21, 3 on Apr 22, 12 on Apr 23, 15 on Apr 24, 0 on Apr 25, 9 on Apr 26).
+        - DO NOT aggregate or combine historical data across multiple years (e.g. do not sum 2026 + 2025 + 2024). Extract strictly from a single year.
 ### Response Quality Rules:
 - Answer naturally in conversational markdown.
 - Never output raw concatenations or malformed strings.
