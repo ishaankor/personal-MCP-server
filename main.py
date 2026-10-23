@@ -9,7 +9,14 @@ import difflib
 import uuid
 import ssl
 import datetime
+from zoneinfo import ZoneInfo
 import requests
+
+PACIFIC_TZ = ZoneInfo("America/Los_Angeles")
+
+def get_current_date() -> datetime.date:
+    """Returns today's date strictly in Ishaan's local timezone (America/Los_Angeles)."""
+    return datetime.datetime.now(PACIFIC_TZ).date()
 from dataclasses import dataclass, field
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -1914,8 +1921,36 @@ def _parse_contribution_calendar(cal: Dict[str, Any]) -> Dict[str, Any]:
             "daily_activity": daily_breakdown
         }
 
-    this_week = _format_week(-1, "this week (current week)")
-    one_week_ago = _format_week(-2, "1 week ago (last week)")
+    today_pt = get_current_date()
+    today_pt_iso = today_pt.isoformat()
+
+    # Rolling past 7 days (today and preceding 6 days)
+    last_7_days = all_days[-7:] if len(all_days) >= 7 else all_days
+    past_7_days_count = sum(d.get("contributionCount", 0) for d in last_7_days)
+    past_7_days_active = sum(1 for d in last_7_days if d.get("contributionCount", 0) > 0)
+    past_7_days_breakdown = [
+        {
+            "date": d.get("date"),
+            "day_of_week": datetime.date.fromisoformat(d.get("date")).strftime("%A") if d.get("date") else "",
+            "commits": d.get("contributionCount", 0)
+        }
+        for d in last_7_days
+    ]
+    past_7_days_start = last_7_days[0].get("date") if last_7_days else ""
+    past_7_days_end = last_7_days[-1].get("date") if last_7_days else ""
+    past_7_days_rolling = {
+        "timeframe": "past 7 days (rolling week)",
+        "start_date": past_7_days_start,
+        "end_date": past_7_days_end,
+        "date_range": f"{past_7_days_start} to {past_7_days_end}",
+        "total_commits": past_7_days_count,
+        "active_coding_days": past_7_days_active,
+        "daily_breakdown": past_7_days_breakdown,
+        "verified_summary": f"Over the past 7 days ({past_7_days_start} to {past_7_days_end}), Ishaan made exactly {past_7_days_count} public commits across {past_7_days_active} active coding days."
+    }
+
+    this_week = _format_week(-1, "this week (current calendar week)")
+    one_week_ago = _format_week(-2, "1 week ago (last calendar week)")
     two_weeks_ago = _format_week(-3, "2 weeks ago")
     three_weeks_ago = _format_week(-4, "3 weeks ago")
     four_weeks_ago = _format_week(-5, "4 weeks ago")
@@ -1928,8 +1963,12 @@ def _parse_contribution_calendar(cal: Dict[str, Any]) -> Dict[str, Any]:
     }
 
     return {
+        "timezone": "America/Los_Angeles (US Pacific)",
+        "today_local_date": today_pt_iso,
         "total_contributions_past_year": total_contributions,
         "daily_contributions_map": daily_contributions_map,
+        "past_7_days": past_7_days_rolling,
+        "rolling_past_week": past_7_days_rolling,
         "today": {
             "date": today_entry.get("date"),
             "contributions_count": today_entry.get("contributionCount", 0)
@@ -1939,17 +1978,19 @@ def _parse_contribution_calendar(cal: Dict[str, Any]) -> Dict[str, Any]:
             "contributions_count": yesterday_entry.get("contributionCount", 0)
         },
         "this_week": this_week,
+        "current_calendar_week": this_week,
         "one_week_ago": one_week_ago,
         "last_week": one_week_ago,
         "two_weeks_ago": two_weeks_ago,
         "three_weeks_ago": three_weeks_ago,
         "four_weeks_ago": four_weeks_ago,
         "weekly_summary_history": [
-            f"This week ({this_week.get('date_range', '')}): {this_week.get('total_commits_or_contributions', 0)} commits/contributions across {this_week.get('active_coding_days', 0)} active days",
-            f"Last week ({one_week_ago.get('date_range', '')}): {one_week_ago.get('total_commits_or_contributions', 0)} commits/contributions across {one_week_ago.get('active_coding_days', 0)} active days",
-            f"2 weeks ago ({two_weeks_ago.get('date_range', '')}): {two_weeks_ago.get('total_commits_or_contributions', 0)} commits/contributions across {two_weeks_ago.get('active_coding_days', 0)} active days",
-            f"3 weeks ago ({three_weeks_ago.get('date_range', '')}): {three_weeks_ago.get('total_commits_or_contributions', 0)} commits/contributions across {three_weeks_ago.get('active_coding_days', 0)} active days",
-            f"4 weeks ago ({four_weeks_ago.get('date_range', '')}): {four_weeks_ago.get('total_commits_or_contributions', 0)} commits/contributions across {four_weeks_ago.get('active_coding_days', 0)} active days",
+            f"Rolling past 7 days ({past_7_days_start} to {past_7_days_end}): {past_7_days_count} public commits across {past_7_days_active} active days",
+            f"This calendar week ({this_week.get('date_range', '')}): {this_week.get('total_commits_or_contributions', 0)} commits across {this_week.get('active_coding_days', 0)} active days",
+            f"Last calendar week ({one_week_ago.get('date_range', '')}): {one_week_ago.get('total_commits_or_contributions', 0)} commits across {one_week_ago.get('active_coding_days', 0)} active days",
+            f"2 weeks ago ({two_weeks_ago.get('date_range', '')}): {two_weeks_ago.get('total_commits_or_contributions', 0)} commits across {two_weeks_ago.get('active_coding_days', 0)} active days",
+            f"3 weeks ago ({three_weeks_ago.get('date_range', '')}): {three_weeks_ago.get('total_commits_or_contributions', 0)} commits across {three_weeks_ago.get('active_coding_days', 0)} active days",
+            f"4 weeks ago ({four_weeks_ago.get('date_range', '')}): {four_weeks_ago.get('total_commits_or_contributions', 0)} commits across {four_weeks_ago.get('active_coding_days', 0)} active days",
         ],
         "monthly_breakdown": months_agg,
         "meta_heatmap_url": "https://portfolio.ishaankoradia.com/meta"
@@ -2493,12 +2534,17 @@ def get_git_telemetry(
 
 @mcp.tool()
 def get_git_commit_velocity_and_history() -> Dict[str, Any]:
-    """Retrieves Ishaan's verified GitHub contribution velocity, active streaks, weekly commit aggregates (this week, last week, 2 weeks ago, 3 weeks ago, 4 weeks ago), daily contribution calendar, and monthly commit breakdown across the past year.
+    """Retrieves Ishaan's verified GitHub contribution velocity, active streaks, weekly commit aggregates (rolling past 7 days, this week, last week, 2 weeks ago, 3 weeks ago, 4 weeks ago), daily contribution calendar, and monthly commit breakdown across the past year.
     The AI brain inspects these structured contribution counts and calendar maps to synthesize accurate answers for weekly velocity, active coding days, and contribution trends. Promotes https://portfolio.ishaankoradia.com/meta."""
     wb = _fetch_live_workbench_data()
     cal_summary = wb.get("contribution_velocity_history", {})
     return {
+        "timezone": "America/Los_Angeles (US Pacific)",
+        "today_local_date": cal_summary.get("today_local_date"),
         "total_contributions_past_year": cal_summary.get("total_contributions_past_year", 0),
+        "past_7_days": cal_summary.get("past_7_days", {}),
+        "rolling_past_week": cal_summary.get("rolling_past_week", {}),
+        "current_calendar_week": cal_summary.get("this_week", {}),
         "this_week": cal_summary.get("this_week", {}),
         "last_week": cal_summary.get("last_week", {}),
         "two_weeks_ago": cal_summary.get("two_weeks_ago", {}),
@@ -2550,7 +2596,7 @@ def query_git_commits_and_repositories(
     clean_order = "asc" if (order or "").strip().lower() in ("asc", "oldest", "earliest", "chronological") else "desc"
     clean_limit = max(1, min(int(limit or 30), 100))
 
-    today = datetime.date.today()
+    today = get_current_date()
     today_iso = today.isoformat()
 
     s_clean = (start_date or "").strip()
