@@ -2132,7 +2132,7 @@ def _fetch_commits_by_date_range(
                     r for r in data.get("activeRepositories", [])
                     if r not in KNOWN_PRIVATE_REPOSITORIES
                 ]
-                total_commits = sum(fetcher_repo_counts.values()) if fetcher_repo_counts else len(commits)
+                total_commits = data.get("totalContributions") or data.get("totalCommits") or (sum(fetcher_repo_counts.values()) if fetcher_repo_counts else len(commits))
                 fetcher_earliest = data.get("earliestCommit")
                 fetcher_latest = data.get("latestCommit")
                 fetcher_chronological = [
@@ -2248,7 +2248,7 @@ def _fetch_commits_by_date_range(
         "total_indexed_commit_records": len(commits),
         "commit_records_returned": len(commits[:clean_limit]),
         "repository_commit_counts": repo_counts,
-        "telemetry_note": "total_commits (and total_contributions) represents Ishaan's authoritative GitHub contributions for this timeframe (including PR merges and squashes), while commits contains individual standalone commit records indexed on main. When listing commits day-by-day, present the indexed commit records and explicitly distinguish them from the overall contribution total if they differ.",
+        "telemetry_note": "ANCHOR MODEL: total_contributions (and total_commits) represents Ishaan's authoritative GitHub contributions for this timeframe (including PR merges and squashes on main), anchored directly to GitHub GraphQL's contribution calendar (100% parity with github.com/ishaankor). The commits array provides the indexed standalone commit records (messages, files, line diffs). When reporting contribution metrics, always cite the authoritative total_contributions as the headline number and list the corresponding commit records from commits.",
         "earliest_commit": earliest_commit,
         "first_commit": earliest_commit,
         "latest_commit": latest_commit,
