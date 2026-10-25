@@ -2037,11 +2037,14 @@ def _fetch_commits_by_date(target_date: str, repo_name: Optional[str] = None) ->
                     c for c in raw_commits
                     if (c.get("repoName") or "") not in KNOWN_PRIVATE_REPOSITORIES
                 ]
+                total_commits_val = data.get("totalContributions") or (len(public_commits) if len(public_commits) != len(raw_commits) else data.get("totalCommits", len(public_commits)))
                 return {
                     "status": "online",
                     "date": clean_date,
                     "repository": clean_repo,
-                    "total_commits": len(public_commits) if len(public_commits) != len(raw_commits) else data.get("totalCommits", len(public_commits)),
+                    "total_commits": total_commits_val,
+                    "total_contributions": total_commits_val,
+                    "daily_contributions": {clean_date: total_commits_val},
                     "commits": public_commits,
                     "contribution_telemetry": data.get("contributionTelemetry"),
                     "meta_page_url": "https://portfolio.ishaankoradia.com/meta",
@@ -2113,6 +2116,7 @@ def _fetch_commits_by_date_range(
     fetcher_by_latest: List[Dict[str, Any]] = []
     fetcher_by_activity: List[Dict[str, Any]] = []
     fetcher_contribution_telemetry: Optional[Dict[str, Any]] = None
+    fetcher_daily_contributions: Dict[str, int] = {}
 
     try:
         res = requests.get(url, headers={"User-Agent": "MCP-Portfolio-Server"}, timeout=12)
@@ -2152,6 +2156,7 @@ def _fetch_commits_by_date_range(
                     if x.get("repository") not in KNOWN_PRIVATE_REPOSITORIES
                 ]
                 fetcher_contribution_telemetry = data.get("contributionTelemetry")
+                fetcher_daily_contributions = data.get("dailyContributions", {})
     except Exception as e:
         print(f"[Git Commits Range] Error fetching via Github-Meta-Fetcher for {date_param}: {e}")
 
@@ -2231,6 +2236,19 @@ def _fetch_commits_by_date_range(
     repos_by_latest_commit = sorted(repos_by_first_commit, key=lambda x: (x.get("latest_commit_date_in_timeframe") or "0000"), reverse=True)
     repos_by_activity = sorted(repos_by_first_commit, key=lambda x: x.get("commit_count_in_timeframe", 0), reverse=True)
 
+    # Build daily breakdown from fetcher_daily_contributions or commits
+    daily_contributions = dict(fetcher_daily_contributions)
+    if not daily_contributions and commits:
+        for c in commits:
+            c_date = (c.get("date") or "")[:10]
+            if c_date:
+                daily_contributions[c_date] = daily_contributions.get(c_date, 0) + 1
+
+    daily_breakdown = [
+        {"date": day, "contributions": count}
+        for day, count in sorted(daily_contributions.items())
+    ]
+
     return {
         "status": "online",
         "start_date": start_date,
@@ -2245,6 +2263,8 @@ def _fetch_commits_by_date_range(
         "total_repositories_worked_on": len(active_repos),
         "total_commits": total_commits,
         "total_contributions": total_commits,
+        "daily_contributions": daily_contributions,
+        "daily_breakdown": daily_breakdown,
         "total_indexed_commit_records": len(commits),
         "commit_records_returned": len(commits[:clean_limit]),
         "repository_commit_counts": repo_counts,
