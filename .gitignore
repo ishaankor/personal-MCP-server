@@ -1,11 +1,21 @@
+# Environment & Local Secrets
+.env
+*.env
+
+# Python & Virtual Environments
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+
+# OS Artifacts
+.DS_Store
+Thumbs.db
+
+# Local raw text caches & dumps
 read_projects.txt
 personal_website.txt
 about_me.txt
 linkedin_data.json
-Dockerfile
-requirements.txt
-render.yaml
-.env
-*.env
-.DS_Store
-__pycache__/
